@@ -1,0 +1,21 @@
+[project]
+name = "miagent"
+version = "0.1.0"
+description = "适配 MiClaw 系统级 Agent 生态的轻量化通用 Agent 框架"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# 图执行引擎。单独拆出来，是为了让 protocol/client 层能在不装 langgraph 的
+# 情况下独立使用 —— 端侧可能只需要协议客户端，不需要完整的图调度。
+graph = ["langgraph>=1.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
