@@ -59,6 +59,26 @@ class TestErrorCodes:
         }
 
 
+class TestMethodEnum:
+    """Method 用 StrEnum 是为了让服务端能做分发校验。"""
+
+    def test_lookup_valid_method(self):
+        assert Method("tools/call") is Method.TOOLS_CALL
+
+    def test_unknown_method_rejected(self):
+        """服务端靠这个抛出 MC-2004。"""
+        with pytest.raises(ValueError):
+            Method("tools/delete")
+
+    def test_extensions_are_namespaced(self):
+        """厂商扩展必须带 miclaw/ 前缀，避免与未来的标准 MCP 方法撞名。"""
+        standard = {Method.INITIALIZE, Method.INITIALIZED,
+                    Method.TOOLS_LIST, Method.TOOLS_CALL, Method.PING}
+        for m in Method:
+            if m not in standard:
+                assert m.startswith("miclaw/"), f"{m} 是扩展方法但没加前缀"
+
+
 class TestJsonRpcEnvelope:
     def test_request_roundtrip(self):
         req = JsonRpcRequest(

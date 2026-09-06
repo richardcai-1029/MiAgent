@@ -13,6 +13,7 @@ MCP 就是在这三种报文之上，约定了一批固定的 method 名。
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,11 +27,21 @@ PROTOCOL_VERSION = "2026-01-01"
 RequestId = str | int
 
 
-class Method:
+class Method(StrEnum):
     """所有支持的 method 名。
 
     前半部分是标准 MCP，任何 MCP 客户端都认识；
     带 miclaw/ 前缀的是我们为小米生态定义的扩展。
+
+    用 StrEnum 而非普通常量类，是为了服务端能直接靠它做分发校验：
+
+        try:
+            method = Method(raw["method"])     # 非法 method 当场抛 ValueError
+        except ValueError:
+            raise MiClawError(ErrorCode.MC_METHOD_NOT_FOUND)
+
+    常量类做不到这一点 —— 得额外维护一份"支持列表"，
+    两处定义迟早会不同步。
     """
 
     # ---- 标准 MCP ----
