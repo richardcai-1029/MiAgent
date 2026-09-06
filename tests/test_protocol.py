@@ -39,6 +39,14 @@ class TestErrorCodes:
         assert is_transport_layer(ErrorCode.MC_RESOURCE_MEMORY_LIMIT)
         assert not is_transport_layer(ErrorCode.AG_PLAN_PARSE_FAILED)
 
+    def test_code_interpolates_as_plain_string(self):
+        """错误码常被直接插进日志。用 StrEnum 保证 f"{code}" 得到 "MC-4001"，
+        而不是老写法 (str, Enum) 那样漏出 "ErrorCode.MC_RESOURCE_MEMORY_LIMIT"。
+        """
+        code = ErrorCode.MC_RESOURCE_MEMORY_LIMIT
+        assert f"{code}" == "MC-4001"
+        assert str(code) == "MC-4001"
+
     def test_error_carries_structured_detail(self):
         """细节要放 detail 里，不能只拼进 message 字符串。"""
         exc = MiClawError(

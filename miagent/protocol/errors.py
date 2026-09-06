@@ -20,11 +20,16 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ErrorCode(str, Enum):
-    """全部错误码。继承 str 是为了能直接当字符串用（比较、序列化）。"""
+class ErrorCode(StrEnum):
+    """全部错误码。
+
+    用 StrEnum（Python 3.11+）而非 (str, Enum)：两者都能当字符串用，但
+    StrEnum 的 f"{code}" 会得到 "MC-4001"，老写法会漏出 "ErrorCode.MC_..."。
+    错误码常被直接插进日志，这个差别很致命。
+    """
 
     # ===== MC-1xxx 传输层：连接、通道、超时 =====
     MC_CONNECTION_FAILED = "MC-1001"
