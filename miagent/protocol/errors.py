@@ -73,6 +73,7 @@ class ErrorCode(StrEnum):
     # ===== AG-4xxx 任务生命周期 =====
     AG_TASK_CANCELLED = "AG-4001"
     AG_TASK_BUDGET_EXCEEDED = "AG-4002"
+    AG_INVALID_CALL_ORDER = "AG-4003"
 
     # ===== AG-5xxx 模型层 =====
     AG_LLM_UNAVAILABLE = "AG-5001"
@@ -119,6 +120,7 @@ _SPEC: dict[ErrorCode, tuple[int | None, str]] = {
 
     ErrorCode.AG_TASK_CANCELLED:        (None, "任务被取消"),
     ErrorCode.AG_TASK_BUDGET_EXCEEDED:  (None, "超出任务耗时或 token 预算"),
+    ErrorCode.AG_INVALID_CALL_ORDER:    (None, "在错误的会话阶段发起调用"),
 
     ErrorCode.AG_LLM_UNAVAILABLE:       (None, "模型服务不可用"),
     ErrorCode.AG_LLM_INVALID_RESPONSE:  (None, "模型返回内容异常"),

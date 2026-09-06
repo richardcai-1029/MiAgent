@@ -15,6 +15,7 @@ JSON 序列化会把内容里的换行转义成 \\\\n，所以正文里的换行
 from __future__ import annotations
 
 import json
+import select
 import subprocess
 import sys
 from typing import IO, Any
@@ -106,7 +107,20 @@ class SubprocessTransport:
             )
         write_message(self._proc.stdin, msg)
 
-    def receive(self) -> dict[str, Any] | None:
+    def receive(self, timeout: float | None = None) -> dict[str, Any] | None:
+        """读一条响应。timeout 为秒；超时抛 MC-1003。
+
+        注：select 在 POSIX 上能作用于管道（我们的目标平台是 Android/Linux），
+        Windows 上 select 只支持 socket，那边需要换成读线程 + 队列。
+        """
+        if timeout is not None:
+            ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+            if not ready:
+                raise MiClawError(
+                    ErrorCode.MC_REQUEST_TIMEOUT,
+                    f"等待响应超过 {timeout}s",
+                    detail={"timeout_s": timeout},
+                )
         return read_message(self._proc.stdout)
 
     def close(self) -> None:
