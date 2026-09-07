@@ -74,35 +74,35 @@ class TestStructuredOutput:
     """结构化输出：schema 由 Pydantic 模型导出，与校验同源。"""
 
     def test_valid_output_parses(self):
-        from miagent.graph.schema import Plan
-        llm = FakeLLM(script=['{"steps":[{"tool":"echo","arguments":{"x":"1"}}]}'])
-        assert llm.complete_structured([user("t")], Plan).steps[0].tool == "echo"
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = FakeLLM(script=['{"tasks":[{"id":"a","description":"d","required_tool":"echo"}]}'])
+        assert llm.complete_structured([user("t")], Plan).tasks[0].required_tool == "echo"
 
     def test_schema_is_injected_into_prompt(self):
         """模型看到的格式说明来自 model_json_schema()，不是手写的一段话。"""
-        from miagent.graph.schema import Plan
-        llm = FakeLLM(script=['{"steps":[]}'])
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = FakeLLM(script=['{"tasks":[]}'])
         llm.complete_structured([user("t")], Plan)
         assert "JSON Schema" in llm.seen[-1][-1].content
 
     def test_self_repair_recovers_from_bad_output(self):
         """第一次不合规 -> 把错误喂回去 -> 第二次改对。"""
-        from miagent.graph.schema import Plan
-        outs = iter(["我建议先查电量。", '{"steps":[{"tool":"echo"}]}'])
+        from miagent.graph.schema import TaskPlan as Plan
+        outs = iter(["我建议先查电量。", '{"tasks":[{"id":"a","description":"d","required_tool":"echo"}]}'])
         llm = FakeLLM(responder=lambda m: next(outs))
-        assert llm.complete_structured([user("t")], Plan).steps[0].tool == "echo"
+        assert llm.complete_structured([user("t")], Plan).tasks[0].required_tool == "echo"
         assert llm.repair_count == 1
 
     def test_repair_prompt_carries_the_actual_error(self):
         """自修复的关键是告诉模型「错在哪」，而不是原样重试。"""
-        from miagent.graph.schema import Plan
-        outs = iter(['{"plan":[]}', '{"steps":[]}'])
+        from miagent.graph.schema import TaskPlan as Plan
+        outs = iter(['{"plan":[]}', '{"tasks":[]}'])
         llm = FakeLLM(responder=lambda m: next(outs))
         llm.complete_structured([user("t")], Plan)
-        assert "steps" in llm.seen[-1][-1].content     # 修复提示里指出了缺失字段
+        assert "tasks" in llm.seen[-1][-1].content     # 修复提示里指出了缺失字段
 
     def test_gives_up_after_max_repairs(self):
-        from miagent.graph.schema import Plan
+        from miagent.graph.schema import TaskPlan as Plan
         llm = FakeLLM(responder=lambda m: "永远不合规")
         with pytest.raises(AgentError) as ei:
             llm.complete_structured([user("t")], Plan, max_repairs=2)
@@ -111,9 +111,9 @@ class TestStructuredOutput:
 
     def test_tool_name_enum_rejects_hallucination(self):
         """工具名收进 enum 后，幻觉在校验阶段即被拒。"""
-        from miagent.graph.schema import plan_model_for
+        from miagent.graph.schema import task_plan_model_for as plan_model_for
         M = plan_model_for(["echo", "system.get_battery"])
-        llm = FakeLLM(responder=lambda m: '{"steps":[{"tool":"system.open_wechat"}]}')
+        llm = FakeLLM(responder=lambda m: '{"tasks":[{"id":"a","description":"d","required_tool":"system.open_wechat"}]}')
         with pytest.raises(AgentError):
             llm.complete_structured([user("t")], M, max_repairs=0)
 

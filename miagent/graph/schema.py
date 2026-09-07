@@ -1,13 +1,12 @@
-"""计划的结构化 schema。
+"""任务图的结构化 schema。
 
-★ 这里是「计划长什么样」的唯一事实来源：
+★ 这里是「任务图长什么样」的唯一事实来源：
 
-    Pydantic 模型  ──model_json_schema()──→  喂给模型的 schema
-                   ──model_validate()────→  校验模型的输出
+    Pydantic 模型 ──model_json_schema()──→ 喂给模型的格式说明
+                  ──model_validate()────→ 校验模型的输出
 
-  写在 prompt 里的格式说明与实际校验逻辑是两份拷贝，改一处忘另一处
-  就会出现「提示词说要 steps、校验器却认 plan」这种问题。由模型定义
-  自动生成 schema 之后，两者不可能不一致。
+  提示词里的格式描述与实际校验逻辑若是两份拷贝，改一处忘另一处
+  就会出现「说要 tasks、却校验 steps」这类问题。
 """
 
 from __future__ import annotations
@@ -17,44 +16,52 @@ from typing import Any, Literal, Sequence
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 
-class PlanStep(BaseModel):
-    model_config = ConfigDict(extra="forbid")   # 多余字段直接判不合格
+class TaskSpec(BaseModel):
+    """模型产出的单个任务。注意它不含 status/result/error ——
+    那些是运行时状态，由框架维护，不该让模型填。"""
 
-    tool: str = Field(description="要调用的工具名")
-    arguments: dict[str, Any] = Field(default_factory=dict, description="工具参数")
-    reason: str = Field(default="", description="为什么需要这一步")
-
-
-class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    steps: list[PlanStep] = Field(description="按顺序执行的步骤；无需工具时为空数组")
+    id: str = Field(description="任务唯一标识，如 task_1")
+    description: str = Field(description="这一步要达成什么")
+    dependencies: list[str] = Field(
+        default_factory=list,
+        description="必须先完成的任务 id 列表；没有依赖则为空数组")
+    required_tool: str = Field(description="要调用的工具名")
+    arguments: dict[str, Any] = Field(default_factory=dict, description="工具参数")
 
 
-def plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
-    """按当前可用工具生成一个收紧的 Plan 模型。
+class TaskPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    把工具名做成枚举写进 schema，带来两个收益：
-      · 模型看到的 schema 里直接列出了合法工具名，减少幻觉
-      · 万一还是幻觉了，在【解析阶段】就被拒（AG-1001），
-        而不是白跑一步再报 AG-2001 —— 省一次工具调用
+    tasks: list[TaskSpec] = Field(
+        description="任务列表；任务间通过 dependencies 表达先后关系，"
+                    "无依赖关系的任务可并行执行。无需工具时为空数组")
 
-    这也是将来接约束解码时的落点：同一份 schema 可以直接转成
-    采样语法，让不合法的工具名在物理上无法被生成。
+
+def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
+    """按当前可用工具生成收紧的模型：工具名成为 schema 里的枚举。
+
+    收益有二：模型看到的 schema 直接列出合法工具名，减少幻觉；
+    万一仍然幻觉，在解析阶段即被拒（AG-1001），不必白跑一步。
+    将来接约束解码时，这份 schema 可直接转成采样语法。
     """
     if not tool_names:
-        return Plan
+        return TaskPlan
 
     tool_field = Literal[tuple(tool_names)]  # type: ignore[valid-type]
-    step_model = create_model(
-        "PlanStepConstrained",
+    spec = create_model(
+        "TaskSpecConstrained",
         __config__=ConfigDict(extra="forbid"),
-        tool=(tool_field, Field(description="要调用的工具名，必须是列出的之一")),
+        id=(str, Field(description="任务唯一标识，如 task_1")),
+        description=(str, Field(description="这一步要达成什么")),
+        dependencies=(list[str], Field(default_factory=list,
+                                       description="必须先完成的任务 id 列表")),
+        required_tool=(tool_field, Field(description="工具名，必须是列出的之一")),
         arguments=(dict[str, Any], Field(default_factory=dict, description="工具参数")),
-        reason=(str, Field(default="", description="为什么需要这一步")),
     )
     return create_model(
-        "PlanConstrained",
+        "TaskPlanConstrained",
         __config__=ConfigDict(extra="forbid"),
-        steps=(list[step_model], Field(description="按顺序执行的步骤；无需工具时为空数组")),
+        tasks=(list[spec], Field(description="任务列表；无依赖的任务可并行")),
     )

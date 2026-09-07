@@ -60,6 +60,8 @@ class ErrorCode(StrEnum):
     AG_PLAN_PARSE_FAILED = "AG-1001"
     AG_PLAN_MAX_STEPS_EXCEEDED = "AG-1002"
     AG_PLAN_NO_PROGRESS = "AG-1003"
+    AG_INVALID_PLAN = "AG-1004"
+    AG_DEPENDENCY_UNRESOLVED = "AG-1005"
 
     # ===== AG-2xxx 工具调度层 =====
     AG_TOOL_NOT_REGISTERED = "AG-2001"
@@ -111,6 +113,8 @@ _SPEC: dict[ErrorCode, tuple[int | None, str]] = {
     ErrorCode.AG_PLAN_PARSE_FAILED:     (None, "模型输出无法解析为可执行计划"),
     ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED: (None, "超出单任务最大步数"),
     ErrorCode.AG_PLAN_NO_PROGRESS:      (None, "连续重复同一调用，判定为无进展循环"),
+    ErrorCode.AG_INVALID_PLAN:          (None, "任务图非法：依赖缺失、自依赖或存在环"),
+    ErrorCode.AG_DEPENDENCY_UNRESOLVED: (None, "存在无法满足的依赖，调度死锁"),
 
     ErrorCode.AG_TOOL_NOT_REGISTERED:   (None, "Agent 本地未注册该工具"),
     ErrorCode.AG_TOOL_SCHEMA_INVALID:   (None, "工具参数未通过 schema 校验"),

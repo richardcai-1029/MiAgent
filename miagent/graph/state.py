@@ -1,48 +1,68 @@
-"""Agent 图的共享状态。
+"""Agent 图的共享状态：任务 DAG 模型。
 
-State 是所有节点之间唯一的通信手段 —— 节点不互相调用，只读写它。
+与线性计划的区别：任务之间有显式依赖，Scheduler 靠依赖解析决定
+「现在能跑哪些」，而不是靠一个递增的游标。这让「并行、分支、汇合」
+成为状态模型本身的能力，而不是事后打的补丁。
 
-字段用不用 reducer，判断标准只有一条：
+    task.status == pending 且所有 dependencies 都 done  →  可执行
 
-    这个字段是「历史」还是「当前状态」？
+★ 关于派生字段的说明
 
-    历史（只增不改）    → 用 reducer 追加：results、trace
-    当前状态（会被覆写）→ 普通字段，替换：plan、cursor、verdict…
+  设计稿里列了 completed_tasks / running_tasks / failed_tasks / tool_results。
+  这些信息 tasks 里已经有了（每个 Task 自带 status 与 result），
+  再单独存一份就是同一事实的两份拷贝 —— 一旦某处漏更新，Scheduler 会
+  看到自相矛盾的状态，而且不报错，只是行为诡异。
 
-plan 特意【不用】reducer：Replanner 产出的是一份全新计划，
-如果追加，新旧计划会混在一起，Scheduler 就会去执行已经被废弃的步骤。
-这类错误不会报错，只会让 Agent 行为诡异 —— 属于最难查的一类 bug。
+  因此它们实现为【从 tasks 派生的函数】（见 dag.py），不进 State。
+  可见性一点不少，但不可能不一致。
 """
 
 from __future__ import annotations
 
 import operator
+from enum import StrEnum
 from typing import Annotated, Any, Literal, TypedDict
 
-# ---- 循环出口的兜底上限。有循环的图必须有出口，否则会无限转 ----
-MAX_ATTEMPTS_PER_STEP = 2   # 同一步最多重试几次，超出 -> AG-1002
+# ---- 循环出口的兜底上限 ----
+MAX_ATTEMPTS_PER_TASK = 2   # 单个任务最多重试几次
 MAX_REPLANS = 2             # 最多重规划几次，超出 -> AG-1003
-MAX_TOTAL_STEPS = 12        # 单个任务累计最多执行几步，超出 -> AG-1002
+MAX_TOTAL_EXECUTIONS = 20   # 单次会话累计最多执行几次工具，超出 -> AG-1002
 
-# 图里 Evaluator 的四种判定。前三种来自架构设计，abort 是循环的安全出口 ——
-# 有循环的图必须有强制出口，否则任务可能永远转下去。
 Verdict = Literal["success", "retry", "replan", "abort"]
 Route = Literal["local", "miclaw"]
 
 
-class Step(TypedDict):
-    """计划中的一步。"""
+class TaskStatus(StrEnum):
+    """任务生命周期。
 
-    id: int
-    tool: str
+        pending ──依赖全部 done──→ ready ──派发──→ running ──┬─→ done
+           │                                                └─→ failed
+           └──依赖中有 failed──────────────────────────────────→ failed（级联）
+    """
+
+    PENDING = "pending"
+    READY = "ready"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class Task(TypedDict):
+    id: str
+    description: str            # 这一步要达成什么，给人和 Replanner 看
+    dependencies: list[str]     # 必须先完成的任务 id
+    required_tool: str
     arguments: dict[str, Any]
-    reason: str            # 为什么需要这一步。给人看，也给 Replanner 看
+    status: TaskStatus
+    result: str | None
+    error: str | None           # 失败时的错误码
+    retry_count: int
 
 
-class StepResult(TypedDict):
-    """一步的执行结果。"""
+class TaskOutcome(TypedDict):
+    """一次执行的产出，供 Evaluator 判定。"""
 
-    step_id: int
+    task_id: str
     tool: str
     ok: bool
     content: str
@@ -53,45 +73,65 @@ class StepResult(TypedDict):
 
 class AgentState(TypedDict, total=False):
     # ---------- 输入 ----------
-    task: str                     # 用户的原始任务，全程只读
+    user_request: str
 
-    # ---------- 计划 ----------
-    plan: list[Step]              # 替换：Replanner 会整体换掉它
-    cursor: int                   # 执行到第几步
+    # ---------- 任务图：唯一事实来源 ----------
+    tasks: dict[str, Task]
 
     # ---------- 本轮调度 ----------
-    current: Step | None          # Scheduler 选出的待执行步骤
-    route: Route | None           # Scheduler 判定该走本地还是 MiClaw
-    last: StepResult | None       # 刚执行完的结果，供 Evaluator 判定
+    current: Task | None        # Scheduler 选出的待执行任务
+    route: Route | None
+    last: TaskOutcome | None
 
     # ---------- 历史（只增不改，用 reducer）----------
-    results: Annotated[list[StepResult], operator.add]
+    errors: Annotated[list[dict[str, Any]], operator.add]
     trace: Annotated[list[str], operator.add]
 
     # ---------- 循环控制 ----------
-    verdict: Verdict | None       # Evaluator 的判定
-    attempts: dict[str, int]      # 步骤 id -> 已尝试次数
+    verdict: Verdict | None
     replan_count: int
+    execution_count: int        # 累计工具调用次数，用于全局上限
 
     # ---------- 输出 ----------
-    answer: str
-    failure: str | None           # 非空表示任务未能完成，值为错误码
+    execution_summary: dict[str, Any]
+    final_answer: str
+    failure: str | None         # 非空表示任务未完成，值为错误码
 
 
-def initial_state(task: str) -> AgentState:
-    """构造初始状态。带 reducer 的字段必须给初值，否则首次合并会失败。"""
+def new_task(
+    task_id: str,
+    description: str,
+    required_tool: str,
+    arguments: dict[str, Any] | None = None,
+    dependencies: list[str] | None = None,
+) -> Task:
+    return Task(
+        id=task_id,
+        description=description,
+        dependencies=list(dependencies or []),
+        required_tool=required_tool,
+        arguments=dict(arguments or {}),
+        status=TaskStatus.PENDING,
+        result=None,
+        error=None,
+        retry_count=0,
+    )
+
+
+def initial_state(user_request: str) -> AgentState:
+    """带 reducer 的字段必须给初值，否则首次合并会失败。"""
     return AgentState(
-        task=task,
-        plan=[],
-        cursor=0,
+        user_request=user_request,
+        tasks={},
         current=None,
         route=None,
         last=None,
-        results=[],
+        errors=[],
         trace=[],
         verdict=None,
-        attempts={},
         replan_count=0,
-        answer="",
+        execution_count=0,
+        execution_summary={},
+        final_answer="",
         failure=None,
     )

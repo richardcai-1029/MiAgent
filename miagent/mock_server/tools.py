@@ -52,7 +52,54 @@ def _sync_settings(args: dict[str, Any]) -> str:
     return "设置已同步至云端"
 
 
+# --- 模拟"餐厅已订满"：第一家总是失败，用于演示重规划 ---
+def _book_restaurant(args: dict[str, Any]) -> str:
+    if args.get("name") == "小馆 A":
+        raise MiClawError(ErrorCode.MC_RESOURCE_BUSY, "小馆 A 今晚已订满")
+    return f"已预订 {args.get('name')} 今晚 19:00"
+
+
 SYSTEM_TOOLS: list[SystemTool] = [
+    SystemTool(
+        name="system.query_calendar",
+        description="查询指定时段日历是否空闲",
+        input_schema=_schema({"when": "时段，如 今晚"}, ["when"]),
+        required_permission="calendar.read",
+        estimated_memory_mb=6,
+        handler=lambda a: f"{a['when']} 19:00-22:00 空闲",
+    ),
+    SystemTool(
+        name="system.search_nearby",
+        description="搜索附近的地点，返回候选列表",
+        input_schema=_schema({"category": "类别，如 餐厅"}, ["category"]),
+        required_permission="location.fine",
+        estimated_memory_mb=14,
+        handler=lambda a: f"附近{a['category']}：小馆 A、小馆 B、小馆 C",
+    ),
+    SystemTool(
+        name="system.book_restaurant",
+        description="预订餐厅",
+        input_schema=_schema({"name": "餐厅名"}, ["name"]),
+        required_permission="location.fine",
+        estimated_memory_mb=8,
+        handler=_book_restaurant,
+    ),
+    SystemTool(
+        name="system.create_event",
+        description="在日历中创建日程",
+        input_schema=_schema({"title": "日程标题", "when": "时间"}, ["title", "when"]),
+        required_permission="calendar.write",
+        estimated_memory_mb=8,
+        handler=lambda a: f"已创建日程「{a['title']}」于 {a['when']}",
+    ),
+    SystemTool(
+        name="system.query_weather",
+        description="查询天气",
+        input_schema=_schema({"when": "时段"}, ["when"]),
+        required_permission=None,
+        estimated_memory_mb=5,
+        handler=lambda a: f"{a['when']}晴，22℃",
+    ),
     SystemTool(
         name="system.sync_settings",
         description="把本机设置同步到账号",
