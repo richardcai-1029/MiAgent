@@ -225,7 +225,12 @@ class MiClawMockServer:
             )
 
         log(f"[server] 执行工具 {name}({args})")
-        return ToolCallResult(content=text_content(tool.handler(args))).model_dump()
+        output = tool.handler(args)
+        if output is None:
+            # 业务失败：工具跑通了，只是没查到结果。这不是 JSON-RPC error ——
+            # 调用本身成立了，所以用 isError 标记，让上层区别对待。
+            return ToolCallResult(content=text_content("未查询到结果"), isError=True).model_dump()
+        return ToolCallResult(content=text_content(output)).model_dump()
 
     def _on_resource_query(self, params: dict[str, Any]) -> dict[str, Any]:
         return {

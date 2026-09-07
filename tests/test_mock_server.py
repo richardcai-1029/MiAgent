@@ -105,7 +105,9 @@ class TestPermissionNegotiation:
         s.handle(req(1, Method.INITIALIZE, protocolVersion=PROTOCOL_VERSION))
         s.handle(req(2, Method.AGENT_REGISTER, permissions=[]))
         names = {t["name"] for t in s.handle(req(3, Method.TOOLS_LIST))["result"]["tools"]}
-        assert names == {"system.get_battery"}
+        # 只剩下 required_permission 为 None 的公开工具
+        from miagent.mock_server.tools import SYSTEM_TOOLS
+        assert names == {t.name for t in SYSTEM_TOOLS if t.required_permission is None}
 
 
 class TestToolCallChecks:

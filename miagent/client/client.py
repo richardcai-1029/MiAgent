@@ -150,11 +150,21 @@ class MiClawClient:
         return [ToolDescriptor.model_validate(t) for t in result.get("tools", [])]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> str:
-        """调用一个系统工具，返回文本结果。"""
+        """调用一个系统工具，返回文本结果。
+
+        MCP 的 isError 表示「工具跑了，但业务上失败」（如查不到联系人），
+        与 JSON-RPC error（调用根本没成立）语义不同。这里把它转成
+        MC-3003 抛出 —— 段位 3 对应「重试无用，换个方案」，正是该有的行为。
+        丢掉这个字段会让业务失败被当成成功，是很隐蔽的 bug。
+        """
         self._require(self._registered, "完成 agent.register 注册")
         result = self._request(Method.TOOLS_CALL, {"name": name, "arguments": arguments or {}})
         parts = [c.get("text", "") for c in result.get("content", []) if c.get("type") == "text"]
-        return "\n".join(parts)
+        text = "\n".join(parts)
+        if result.get("isError"):
+            raise MiClawError(ErrorCode.MC_TOOL_EXECUTION_FAILED, text,
+                              detail={"tool": name, "kind": "business_failure"})
+        return text
 
     def query_resource(self) -> dict[str, Any]:
         self._require(self._handshaked, "完成 initialize 握手")

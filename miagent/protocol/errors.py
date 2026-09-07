@@ -65,6 +65,7 @@ class ErrorCode(StrEnum):
     AG_TOOL_NOT_REGISTERED = "AG-2001"
     AG_TOOL_SCHEMA_INVALID = "AG-2002"
     AG_TOOL_RESULT_UNPARSABLE = "AG-2003"
+    AG_TOOL_EXECUTION_FAILED = "AG-2004"
 
     # ===== AG-3xxx 上下文管理层 =====
     AG_CONTEXT_OVERFLOW = "AG-3001"
@@ -114,6 +115,7 @@ _SPEC: dict[ErrorCode, tuple[int | None, str]] = {
     ErrorCode.AG_TOOL_NOT_REGISTERED:   (None, "Agent 本地未注册该工具"),
     ErrorCode.AG_TOOL_SCHEMA_INVALID:   (None, "工具参数未通过 schema 校验"),
     ErrorCode.AG_TOOL_RESULT_UNPARSABLE: (None, "工具返回内容无法解析"),
+    ErrorCode.AG_TOOL_EXECUTION_FAILED: (None, "工具执行时抛出未预期异常"),
 
     ErrorCode.AG_CONTEXT_OVERFLOW:      (None, "上下文长度超出模型窗口"),
     ErrorCode.AG_STATE_CORRUPTED:       (None, "Agent 状态非法"),
@@ -135,6 +137,35 @@ def describe(code: ErrorCode) -> str:
 def jsonrpc_code(code: ErrorCode) -> int | None:
     """取对应的 JSON-RPC 整数码；AG-* 返回 None（不上网络）。"""
     return _SPEC[code][0]
+
+
+class RetryPolicy(StrEnum):
+    """收到一个错误后该怎么办。"""
+
+    NONE = "none"                  # 别重试，换个方案
+    BACKOFF = "backoff"            # 退避后重试，多半能成
+    REHANDSHAKE = "rehandshake"    # 重新握手再试
+    DEGRADE = "degrade"            # 降级或延迟：换个轻量方案，或等资源释放
+    ASK_USER = "ask_user"          # 需要用户介入（授权）
+
+
+def retry_policy(code: ErrorCode) -> RetryPolicy:
+    """由错误码的**段位**决定重试策略。
+
+    这是千位分段编号的兑现点 —— 决策只看段位，不查逐条的表。
+    好处是新增错误码时策略自动继承，不会因为漏登记而走错分支。
+    """
+    band = code.value[3]           # "MC-4001" -> "4"
+    if is_transport_layer(code):
+        return {
+            "1": RetryPolicy.BACKOFF,      # 传输抖动
+            "2": RetryPolicy.REHANDSHAKE,  # 协议状态问题
+            "3": RetryPolicy.NONE,         # 工具本身有问题，重试无意义
+            "4": RetryPolicy.DEGRADE,      # 资源不足
+            "5": RetryPolicy.ASK_USER,     # 权限问题
+        }.get(band, RetryPolicy.NONE)
+    # AG-* 是 Agent 自身的问题，重试同样的动作不会有不同结果
+    return RetryPolicy.NONE
 
 
 def is_transport_layer(code: ErrorCode) -> bool:

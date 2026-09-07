@@ -6,12 +6,14 @@
 
 from .errors import (
     AgentError,
+    RetryPolicy,
     ErrorCode,
     MiAgentError,
     MiClawError,
     describe,
     is_transport_layer,
     jsonrpc_code,
+    retry_policy,
 )
 from .messages import (
     PROTOCOL_VERSION,
@@ -42,6 +44,7 @@ __all__ = [
     "MiAgentError",
     "MiClawError",
     "RequestId",
+    "RetryPolicy",
     "ResourceBudget",
     "ToolCallResult",
     "ToolDescriptor",
@@ -50,6 +53,7 @@ __all__ = [
     "is_transport_layer",
     "jsonrpc_code",
     "parse_incoming",
+    "retry_policy",
     "success_response",
     "text_content",
 ]

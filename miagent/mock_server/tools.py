@@ -68,6 +68,15 @@ SYSTEM_TOOLS: list[SystemTool] = [
         handler=lambda a: f"{a['name']}：13800138000",
     ),
     SystemTool(
+        name="system.query_order",
+        description="按订单号查询订单状态",
+        input_schema=_schema({"order_id": "订单号"}, ["order_id"]),
+        required_permission=None,
+        estimated_memory_mb=6,
+        # 返回 None 代表业务失败（查无此单），服务端会置 isError=True
+        handler=lambda a: None if a["order_id"] != "SN001" else "订单 SN001：已发货",
+    ),
+    SystemTool(
         name="system.capture_screen",
         description="截取当前屏幕并返回图像",
         input_schema=_schema({}, []),
