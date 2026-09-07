@@ -68,3 +68,57 @@ class TestPlanHelpers:
     def test_step_collects_arguments(self):
         assert step("system.send_sms", to="10086", text="hi")["arguments"] == {
             "to": "10086", "text": "hi"}
+
+
+class TestStructuredOutput:
+    """结构化输出：schema 由 Pydantic 模型导出，与校验同源。"""
+
+    def test_valid_output_parses(self):
+        from miagent.graph.schema import Plan
+        llm = FakeLLM(script=['{"steps":[{"tool":"echo","arguments":{"x":"1"}}]}'])
+        assert llm.complete_structured([user("t")], Plan).steps[0].tool == "echo"
+
+    def test_schema_is_injected_into_prompt(self):
+        """模型看到的格式说明来自 model_json_schema()，不是手写的一段话。"""
+        from miagent.graph.schema import Plan
+        llm = FakeLLM(script=['{"steps":[]}'])
+        llm.complete_structured([user("t")], Plan)
+        assert "JSON Schema" in llm.seen[-1][-1].content
+
+    def test_self_repair_recovers_from_bad_output(self):
+        """第一次不合规 -> 把错误喂回去 -> 第二次改对。"""
+        from miagent.graph.schema import Plan
+        outs = iter(["我建议先查电量。", '{"steps":[{"tool":"echo"}]}'])
+        llm = FakeLLM(responder=lambda m: next(outs))
+        assert llm.complete_structured([user("t")], Plan).steps[0].tool == "echo"
+        assert llm.repair_count == 1
+
+    def test_repair_prompt_carries_the_actual_error(self):
+        """自修复的关键是告诉模型「错在哪」，而不是原样重试。"""
+        from miagent.graph.schema import Plan
+        outs = iter(['{"plan":[]}', '{"steps":[]}'])
+        llm = FakeLLM(responder=lambda m: next(outs))
+        llm.complete_structured([user("t")], Plan)
+        assert "steps" in llm.seen[-1][-1].content     # 修复提示里指出了缺失字段
+
+    def test_gives_up_after_max_repairs(self):
+        from miagent.graph.schema import Plan
+        llm = FakeLLM(responder=lambda m: "永远不合规")
+        with pytest.raises(AgentError) as ei:
+            llm.complete_structured([user("t")], Plan, max_repairs=2)
+        assert ei.value.code is ErrorCode.AG_LLM_INVALID_RESPONSE
+        assert llm.call_count == 3                     # 原始 1 次 + 修复 2 次
+
+    def test_tool_name_enum_rejects_hallucination(self):
+        """工具名收进 enum 后，幻觉在校验阶段即被拒。"""
+        from miagent.graph.schema import plan_model_for
+        M = plan_model_for(["echo", "system.get_battery"])
+        llm = FakeLLM(responder=lambda m: '{"steps":[{"tool":"system.open_wechat"}]}')
+        with pytest.raises(AgentError):
+            llm.complete_structured([user("t")], M, max_repairs=0)
+
+    def test_native_support_is_declared_per_implementation(self):
+        """FakeLLM 靠 prompt+校验；云端实现声明原生支持并覆写策略。"""
+        from miagent.llm.openai_compatible import OpenAICompatibleLLM
+        assert FakeLLM(script=[]).supports_native_structured_output is False
+        assert OpenAICompatibleLLM.supports_native_structured_output is True

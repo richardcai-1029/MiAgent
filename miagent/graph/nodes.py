@@ -13,9 +13,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+
 from ..llm import LLM, LLMMessage, system, user
+from ..llm.base import extract_json
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
+from .schema import Plan, plan_model_for
 from .state import (
     MAX_ATTEMPTS_PER_STEP,
     MAX_REPLANS,
@@ -38,49 +42,45 @@ class Deps:
 # 计划的解析：模型返回文本，我们要把它变成结构化的步骤
 # ============================================================
 
-_PLAN_FORMAT = """请只输出 JSON，不要有任何其他文字。格式：
-{"steps": [{"tool": "工具名", "arguments": {"参数名": "值"}, "reason": "为什么需要这一步"}]}
-若任务无需调用任何工具，输出 {"steps": []}。"""
+def _to_steps(parsed: BaseModel) -> list[Step]:
+    """把校验通过的 Pydantic 模型转成图内部用的 Step。"""
+    return [
+        Step(id=i, tool=s.tool, arguments=s.arguments, reason=s.reason)
+        for i, s in enumerate(parsed.steps)
+    ]
 
 
-def _extract_json(text: str) -> str:
-    """模型常把 JSON 包在 ```json 代码块里，先剥掉。"""
-    text = text.strip()
-    if "```" in text:
-        parts = text.split("```")
-        for p in parts:
-            p = p.removeprefix("json").strip()
-            if p.startswith("{"):
-                return p
-    start, end = text.find("{"), text.rfind("}")
-    return text[start : end + 1] if start != -1 and end != -1 else text
+def parse_plan(text: str, model: type[BaseModel] = Plan) -> list[Step]:
+    """把模型输出解析并校验成步骤列表。不合 schema 即 AG-1001。
 
-
-def parse_plan(text: str) -> list[Step]:
-    """把模型输出解析成步骤列表。解析失败即 AG-1001。
-
-    这里不做"容错兜底猜一个计划"——模型没按格式输出就是没输出，
-    猜出来的计划会让 Agent 做出用户没要求的事，比直接失败危险得多。
+    这里不做「容错兜底猜一个计划」—— 模型没按格式输出就是没输出，
+    猜出来的计划会让 Agent 做用户没要求的事，比直接失败危险得多。
     """
     try:
-        data = json.loads(_extract_json(text))
-        raw_steps = data["steps"]
+        return _to_steps(model.model_validate_json(extract_json(text)))
     except Exception as e:
         raise AgentError(
             ErrorCode.AG_PLAN_PARSE_FAILED,
             "模型输出无法解析为计划",
-            detail={"raw": text[:200], "reason": str(e)},
+            detail={"raw": text[:200], "reason": str(e)[:200]},
         ) from e
 
-    plan: list[Step] = []
-    for i, s in enumerate(raw_steps):
-        if "tool" not in s:
+
+def _plan_with_schema(deps: Deps, messages: list[LLMMessage]) -> list[Step]:
+    """要求模型产出结构化计划。
+
+    工具名会被收进 schema 的 enum —— 幻觉出的工具在【解析阶段】就被拒，
+    不必白跑一步再报 AG-2001。
+    """
+    model = plan_model_for([t.name for t in deps.registry])
+    try:
+        return _to_steps(deps.llm.complete_structured(messages, model))
+    except AgentError as e:
+        if e.code is ErrorCode.AG_LLM_INVALID_RESPONSE:
+            # 分层：模型层说「输出不合 schema」，规划层说「没能产出可执行计划」
             raise AgentError(ErrorCode.AG_PLAN_PARSE_FAILED,
-                             f"第 {i + 1} 步缺少 tool 字段", detail={"step": s})
-        plan.append(Step(id=i, tool=s["tool"],
-                         arguments=s.get("arguments") or {},
-                         reason=s.get("reason", "")))
-    return plan
+                             "模型未能产出合法计划", detail=e.detail) from e
+        raise
 
 
 # ============================================================
@@ -90,12 +90,17 @@ def parse_plan(text: str) -> list[Step]:
 
 def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
     tools = json.dumps(deps.registry.to_model_schemas(), ensure_ascii=False, indent=2)
-    messages: list[LLMMessage] = [
-        system(f"你是端侧智能助理的规划器。根据用户任务和可用工具，"
-               f"拆解出最少的执行步骤。\n\n{_PLAN_FORMAT}"),
-        user(f"可用工具：\n{tools}\n\n任务：{state['task']}"),
-    ]
-    plan = parse_plan(deps.llm.complete(messages).content)
+    try:
+        plan = _plan_with_schema(deps, [
+            system("你是端侧智能助理的规划器。根据用户任务和可用工具，拆解出最少的执行步骤。"),
+            user(f"可用工具：\n{tools}\n\n任务：{state['task']}"),
+        ])
+    except AgentError as e:
+        # 规划失败不能把整个调用炸掉 —— 用户至少要收到一句解释。
+        # 空计划会让 Scheduler 立刻判定"已完成"并转向 Finalizer，
+        # Finalizer 看到 failure 就会生成失败说明。
+        return {"plan": [], "cursor": 0, "verdict": None, "failure": e.code.value,
+                "trace": [f"planner: 规划失败 {e.code}"]}
     return {
         "plan": plan,
         "cursor": 0,
@@ -211,13 +216,17 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
         for r in state["results"]
     )
     tools = json.dumps(deps.registry.to_model_schemas(), ensure_ascii=False)
-    messages = [
-        system(f"你是端侧智能助理的重规划器。原计划中有步骤失败了，"
-               f"请基于已有结果重新规划【剩余】要做的事，避开失败的做法。\n\n{_PLAN_FORMAT}"),
-        user(f"可用工具：{tools}\n\n任务：{state['task']}\n\n"
-             f"已执行情况：\n{done}\n\n请给出新的步骤。"),
-    ]
-    plan = parse_plan(deps.llm.complete(messages).content)
+    try:
+        plan = _plan_with_schema(deps, [
+            system("你是端侧智能助理的重规划器。原计划中有步骤失败了，"
+                   "请基于已有结果重新规划【剩余】要做的事，避开失败的做法。"),
+            user(f"可用工具：{tools}\n\n任务：{state['task']}\n\n"
+                 f"已执行情况：\n{done}\n\n请给出新的步骤。"),
+        ])
+    except AgentError as e:
+        return {"plan": [], "cursor": 0, "current": None, "verdict": None,
+                "replan_count": state["replan_count"] + 1, "failure": e.code.value,
+                "trace": [f"replanner: 重规划失败 {e.code}"]}
     return {
         "plan": plan,
         "cursor": 0,            # 新计划从头开始

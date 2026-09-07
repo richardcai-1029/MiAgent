@@ -10,10 +10,19 @@
 
 from __future__ import annotations
 
+from typing import TypeVar
+
+from pydantic import BaseModel
+
 from .base import LLM, LLMMessage
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class OpenAICompatibleLLM(LLM):
+    # 服务端用 JSON Schema 模式保证输出格式，无需自修复重试
+    supports_native_structured_output = True
+
     def __init__(
         self,
         model: str,
@@ -43,5 +52,18 @@ class OpenAICompatibleLLM(LLM):
         resp = self._ensure_client().chat.completions.create(
             model=self._model,
             messages=[{"role": m.role, "content": m.content} for m in messages],
+        )
+        return resp.choices[0].message.content or ""
+
+    def _complete_structured(self, messages: list[LLMMessage], schema: type[T]) -> str:
+        """用服务端的 JSON Schema 模式保证格式，而不是靠 prompt 祈祷。"""
+        resp = self._ensure_client().chat.completions.create(
+            model=self._model,
+            messages=[{"role": m.role, "content": m.content} for m in messages],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": schema.__name__, "strict": True,
+                                "schema": schema.model_json_schema()},
+            },
         )
         return resp.choices[0].message.content or ""

@@ -190,12 +190,27 @@ class TestEndToEnd:
         after_replan = [r for r in out["results"] if r["tool"] == "system.sync_settings"]
         assert after_replan[0]["attempt"] == 1
 
-    def test_hopeless_task_aborts_with_failure_code(self, registry):
-        """模型反复规划不存在的工具 -> 重规划次数耗尽 -> 中止并给出错误码。"""
-        bad = plan_json(step("system.does_not_exist"))
-        out = run(registry, "做一件做不到的事", llm_for(bad, replan=bad))
-        assert out["failure"] == ErrorCode.AG_PLAN_NO_PROGRESS.value
+    def test_hallucinated_tool_rejected_at_planning(self, registry):
+        """工具名被收进 schema 的 enum，幻觉在【规划阶段】就被拒 ——
+        不必白跑一步再报 AG-2001。"""
+        out = run(registry, "做一件做不到的事",
+                  llm_for(plan_json(step("system.does_not_exist"))))
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
+        assert out["results"] == []   # 一步都没执行，省下了一次工具调用
         assert out["answer"]          # 仍然给用户一个交代，而不是抛异常
+
+    def test_repeated_execution_failure_aborts(self, registry):
+        """工具存在但一直失败 -> 重规划次数耗尽 -> 中止并给出错误码。"""
+        always_fail = plan_json(step("system.capture_screen"))
+        out = run(registry, "反复截屏", llm_for(always_fail, replan=always_fail))
+        assert out["failure"] == ErrorCode.AG_PLAN_NO_PROGRESS.value
+        assert out["answer"]
+
+    def test_planner_failure_does_not_crash_the_graph(self, registry):
+        """模型输出完全不合 schema 时，用户仍应收到解释而非异常。"""
+        out = run(registry, "随便问问", llm_for("我觉得你应该自己看一下"))
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
+        assert out["answer"]
 
     def test_empty_plan_goes_straight_to_finalizer(self, registry):
         out = run(registry, "你好", llm_for(plan_json(), answer="你好，有什么可以帮你？"))
