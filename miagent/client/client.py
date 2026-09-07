@@ -38,8 +38,11 @@ class MiClawClient:
         self,
         command: list[str] | None = None,
         timeout: float | None = 10.0,
+        transport: Any = None,
     ) -> None:
-        self._transport = SubprocessTransport(command or DEFAULT_SERVER_COMMAND)
+        # 传输层可注入：默认拉起子进程，测试与调试时可换成进程内回环。
+        # 客户端只依赖 send/receive/close 三个方法，不关心底下是管道还是别的。
+        self._transport = transport or SubprocessTransport(command or DEFAULT_SERVER_COMMAND)
         self._timeout = timeout
         self._next_id = 0
 

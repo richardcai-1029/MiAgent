@@ -14,6 +14,7 @@ JSON 序列化会把内容里的换行转义成 \\\\n，所以正文里的换行
 
 from __future__ import annotations
 
+import io
 import json
 import select
 import subprocess
@@ -138,6 +139,51 @@ class SubprocessTransport:
 
     # 支持 with 语句，保证异常时也能回收子进程
     def __enter__(self) -> SubprocessTransport:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class LoopbackTransport:
+    """进程内回环：把客户端直接接到一个服务端对象上，不启子进程。
+
+    用途是测试与调试 —— 没有进程边界，一处就能观察到两侧的完整调用链，
+    而且省掉了每个用例拉起子进程的开销。
+
+    ★ 它仍然走真实的 write_message / read_message 分帧路径，
+      只是把管道换成了内存缓冲区。这样序列化行为与真实传输完全一致
+      （比如 tuple 会变成 list、非字符串的 dict 键会被转成字符串），
+      不会出现"回环能过、真管道跑不通"的情况。
+    """
+
+    def __init__(self, server: Any) -> None:
+        self._server = server
+        self._inbox: list[dict[str, Any]] = []
+        self._closed = False
+
+    @staticmethod
+    def _through_wire(msg: dict[str, Any]) -> dict[str, Any]:
+        """让报文真实地走一遍分帧与解析。"""
+        buf = io.StringIO()
+        write_message(buf, msg)
+        buf.seek(0)
+        return read_message(buf)
+
+    def send(self, msg: dict[str, Any]) -> None:
+        if self._closed:
+            raise MiClawError(ErrorCode.MC_TRANSPORT_CLOSED, "回环已关闭")
+        response = self._server.handle(self._through_wire(msg))
+        if response is not None:          # 通知类报文无响应
+            self._inbox.append(self._through_wire(response))
+
+    def receive(self, timeout: float | None = None) -> dict[str, Any] | None:
+        return self._inbox.pop(0) if self._inbox else None
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __enter__(self) -> "LoopbackTransport":
         return self
 
     def __exit__(self, *exc: object) -> None:
