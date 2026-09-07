@@ -22,8 +22,11 @@ from typing import Annotated, Any, Literal, TypedDict
 # ---- 循环出口的兜底上限。有循环的图必须有出口，否则会无限转 ----
 MAX_ATTEMPTS_PER_STEP = 2   # 同一步最多重试几次，超出 -> AG-1002
 MAX_REPLANS = 2             # 最多重规划几次，超出 -> AG-1003
+MAX_TOTAL_STEPS = 12        # 单个任务累计最多执行几步，超出 -> AG-1002
 
-Verdict = Literal["success", "retry", "replan"]
+# 图里 Evaluator 的四种判定。前三种来自架构设计，abort 是循环的安全出口 ——
+# 有循环的图必须有强制出口，否则任务可能永远转下去。
+Verdict = Literal["success", "retry", "replan", "abort"]
 Route = Literal["local", "miclaw"]
 
 

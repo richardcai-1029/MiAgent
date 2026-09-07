@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..protocol import ErrorCode, MiClawError
+
 
 @dataclass(frozen=True)
 class SystemTool:
@@ -34,7 +36,31 @@ def _schema(props: dict[str, str], required: list[str]) -> dict[str, Any]:
     }
 
 
+# --- 模拟 IPC 抖动：第一次调用超时，之后成功。用于验证 retry 分支。
+#     仅存在于 mock 服务端，真实 MiClaw 不需要这种东西。
+_flaky_calls = {"n": 0}
+
+
+def reset_flaky() -> None:
+    _flaky_calls["n"] = 0
+
+
+def _sync_settings(args: dict[str, Any]) -> str:
+    _flaky_calls["n"] += 1
+    if _flaky_calls["n"] == 1:
+        raise MiClawError(ErrorCode.MC_REQUEST_TIMEOUT, "与设置服务通信超时")
+    return "设置已同步至云端"
+
+
 SYSTEM_TOOLS: list[SystemTool] = [
+    SystemTool(
+        name="system.sync_settings",
+        description="把本机设置同步到账号",
+        input_schema=_schema({}, []),
+        required_permission=None,
+        estimated_memory_mb=10,
+        handler=_sync_settings,
+    ),
     SystemTool(
         name="system.get_battery",
         description="查询设备当前电量与充电状态",

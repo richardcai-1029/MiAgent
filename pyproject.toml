@@ -11,7 +11,7 @@ dependencies = [
 # 图执行引擎。单独拆出来，是为了让 protocol/client 层能在不装 langgraph 的
 # 情况下独立使用 —— 端侧可能只需要协议客户端，不需要完整的图调度。
 graph = ["langgraph>=1.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "psutil>=5.9", "grandalf>=0.8"]
 
 [build-system]
 requires = ["hatchling"]
