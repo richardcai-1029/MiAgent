@@ -59,7 +59,8 @@ class MiClawMockServer:
         user_denied: set[str] | None = None,
     ) -> None:
         self.state = SessionState.CONNECTED
-        # 默认给一个偏紧的配额，好让 capture_screen 这类重工具触发 MC-4001
+        # mock 用的配额值，无外部依据；取得偏紧只为让 capture_screen
+        # 这类重工具能触发 MC-4001，便于验证资源约束路径
         self.budget = budget or ResourceBudget(max_memory_mb=64)
         # 模拟「用户在授权弹窗里拒绝了通讯录」
         self.user_denied = user_denied if user_denied is not None else {"contacts.read"}

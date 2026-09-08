@@ -5,7 +5,7 @@
 
 ★ openai 包在 _complete 内部才导入，不在模块顶层。
   这样端侧只用 FakeLLM 或本地模型时，不会把整个 openai 包及其
-  HTTP 依赖栈加载进内存 —— 与清单 E-2/E-3 的裁剪目标一致。
+  HTTP 依赖栈加载进内存。
 """
 
 from __future__ import annotations

@@ -61,10 +61,17 @@ def test_build_agent_is_lazily_exported():
     assert out == "True"
 
 
-def test_light_profile_stays_under_budget():
-    """瘦客户端形态的常驻内存须留在端侧配额内。"""
+# 回归哨兵阈值。当前瘦客户端实测约 30 MB；此处取 40 MB 只为捕捉显著退化
+# （例如误引入某个重型纯 Python 包），不代表任何外部要求 ——
+# MiClaw 侧的真实资源配额尚不可获取。
+LIGHT_PROFILE_TRIPWIRE_MB = 40
+
+
+def test_light_profile_does_not_regress():
+    """瘦客户端形态的常驻内存不应显著上升。"""
     probe = ("import os, psutil, miagent.client, miagent.tools, miagent.llm; "
              "print(psutil.Process(os.getpid()).memory_info().rss // 1024 // 1024)")
     rss = int(subprocess.run([sys.executable, "-c", probe],
                             capture_output=True, text=True, check=True).stdout)
-    assert rss <= 45, f"瘦客户端常驻 {rss}MB，超出 45MB 上限"
+    assert rss <= LIGHT_PROFILE_TRIPWIRE_MB, (
+        f"瘦客户端常驻 {rss}MB，超过回归哨兵 {LIGHT_PROFILE_TRIPWIRE_MB}MB")

@@ -7,8 +7,11 @@
               只做系统调用转发与工具调度，不做图调度。
     完整 Agent 追加图引擎，具备任务规划、依赖调度、重规划能力。
 
-每项都在独立子进程中测量：同进程内测第二个目标时，第一个的模块已在
+每项都在独立子进程中测量：同进程内测第二项时，第一项的模块已在
 sys.modules 里，结果会偏低。
+
+本脚本只输出实测值，不判定达标 —— MiClaw 侧的真实资源配额尚不可获取，
+任务书亦未给出具体数值，任何阈值都只能是假设。
 
 运行：  python bench/baseline.py
 """
@@ -31,10 +34,6 @@ PROFILES = [
     ("完整 Agent", "import miagent.client, miagent.tools, miagent.llm; "
                    "from miagent.graph import build_agent"),
 ]
-
-# 验收目标
-TARGETS = {"瘦客户端": {"rss_mb": 45, "elapsed_ms": 150},
-           "完整 Agent": {"rss_mb": 80, "elapsed_ms": 500}}
 
 PROBE = '''
 import json, os, sys, time
@@ -73,8 +72,8 @@ def measure(code: str, repeat: int = 3) -> dict:
 
 def main() -> None:
     print(f"Python {sys.version.split()[0]}\n")
-    print(f"  {'部署形态':<14}{'常驻内存':>10}{'冷启动':>11}{'模块数':>9}{'云端模块':>12}{'达标':>7}")
-    print("  " + "-" * 66)
+    print(f"  {'部署形态':<14}{'常驻内存':>10}{'冷启动':>11}{'模块数':>9}{'云端模块':>12}")
+    print("  " + "-" * 58)
 
     results = {}
     for label, code in PROFILES:
@@ -82,18 +81,8 @@ def main() -> None:
         results[label] = r
         cloud = sum(n for pkg, n in r["tops"].items() if pkg in CLOUD_PACKAGES)
         pct = f"{cloud * 100 // r['modules']}%" if r["modules"] else "—"
-        target = TARGETS.get(label)
-        if target:
-            ok = r["rss_mb"] <= target["rss_mb"] and r["elapsed_ms"] <= target["elapsed_ms"]
-            mark = "✅" if ok else "✗"
-        else:
-            mark = "—"
         print(f"  {label:<14}{r['rss_mb']:>7} MB{r['elapsed_ms']:>9} ms"
-              f"{r['modules']:>9}{cloud:>7} ({pct})   {mark}")
-
-    print("\n  验收目标：")
-    for label, t in TARGETS.items():
-        print(f"    {label:<12} 常驻 ≤ {t['rss_mb']} MB，冷启动 ≤ {t['elapsed_ms']} ms")
+              f"{r['modules']:>9}{cloud:>7} ({pct})")
 
     full = results["完整 Agent"]
     print(f"\n  完整形态的云端模块构成（端侧不需要，但无法从 LangGraph 中剥离）：")

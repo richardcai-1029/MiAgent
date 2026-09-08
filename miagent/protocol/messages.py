@@ -129,6 +129,9 @@ class JsonRpcResponse(BaseModel):
 class ResourceBudget(BaseModel):
     """端侧资源配额。握手时由 MiClaw 下发，Agent 必须在此约束内运行。
 
+    ⚠️ 下列默认值仅为占位，无外部依据 —— 真实数值由 MiClaw 在握手响应中给出。
+       不要把它们当作端侧的实际约束来做设计判断。
+
     这是端侧场景相对云端框架多出来的一层约束：云端 Agent 不关心内存和电量，
     端侧必须关心 —— 超了就是 MC-4xxx。
     """
