@@ -15,16 +15,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
 
-from ..llm import LLM, LLMMessage, system, user
+from ..llm import LLMMessage, system, user
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
 from . import dag
-from .schema import TaskPlan, task_plan_model_for
+from .nodes_meta import Deps
+from .schema import task_plan_model_for
 from .state import (
     MAX_ATTEMPTS_PER_TASK,
     DispatchItem,
@@ -36,16 +36,6 @@ from .state import (
     TaskStatus,
     new_task,
 )
-
-
-@dataclass
-class Deps:
-    llm: LLM
-    registry: ToolRegistry
-    # MiClaw 侧并发上限，取自握手时下发的 ResourceBudget.max_concurrent_calls。
-    # 本地工具不受此限：它们是 CPU 密集的，受 GIL 限制并发无收益，
-    # 也不占用系统侧资源配额。
-    max_concurrent_miclaw: int = 2
 
 
 # ============================================================
