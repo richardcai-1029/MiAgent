@@ -13,14 +13,19 @@ from .routers import route_after_evaluator, route_after_scheduler
 from .state import AgentState
 
 
-def build_agent(llm: LLM, registry: ToolRegistry, **compile_kwargs):
+def build_agent(llm: LLM, registry: ToolRegistry,
+                max_concurrent_miclaw: int = 2, **compile_kwargs):
     """构建 Agent 图。
+
+    max_concurrent_miclaw 应取自握手时下发的 ResourceBudget.max_concurrent_calls，
+    限制同一轮并行派发的 MiClaw 调用数（清单 C-6）。本地工具不受此限。
 
     compile_kwargs 透传给 LangGraph 的 compile()，
     例如 checkpointer=... 与 interrupt_before=["mcp_executor"]
     可以在调用系统能力前暂停，交由用户确认。
     """
-    deps = nodes.Deps(llm=llm, registry=registry)
+    deps = nodes.Deps(llm=llm, registry=registry,
+                      max_concurrent_miclaw=max_concurrent_miclaw)
     bind = lambda fn, **kw: partial(fn, deps=deps, **kw)  # noqa: E731
 
     g = StateGraph(AgentState)
@@ -38,7 +43,8 @@ def build_agent(llm: LLM, registry: ToolRegistry, **compile_kwargs):
     g.add_edge(START, "planner")
     g.add_edge("planner", "scheduler")
 
-    # 分叉一：调度之后走哪条执行路径，还是直接收尾
+    # 分叉一：调度之后并行扇出到执行节点，或直接收尾。
+    # route_after_scheduler 返回 Send 列表时即为并行派发。
     g.add_conditional_edges("scheduler", route_after_scheduler,
                             ["local_tool", "mcp_executor", "finalizer"])
 

@@ -59,6 +59,23 @@ class Task(TypedDict):
     retry_count: int
 
 
+def append_or_reset(old: list[Any], new: list[Any]) -> list[Any]:
+    """列表 reducer：空列表表示重置，否则追加。
+
+    并行执行时多个分支各自写回一条结果，需要追加；Evaluator 消费完之后
+    又需要清空。operator.add 只能表达追加，无法表达清空，所以自定义一个。
+    """
+    return [] if not new else [*(old or []), *new]
+
+
+class DispatchItem(TypedDict):
+    """Scheduler 决定本轮要派发的一项。route 随任务走，
+    使得同一轮里本地工具与 MiClaw 工具可以同时派发。"""
+
+    task: Task
+    route: Route
+
+
 class TaskOutcome(TypedDict):
     """一次执行的产出，供 Evaluator 判定。"""
 
@@ -79,9 +96,10 @@ class AgentState(TypedDict, total=False):
     tasks: dict[str, Task]
 
     # ---------- 本轮调度 ----------
-    current: Task | None        # Scheduler 选出的待执行任务
-    route: Route | None
-    last: TaskOutcome | None
+    # 列表而非单个：同一轮里彼此无依赖的任务会被一起派发。
+    dispatch: list[DispatchItem]
+    # 并行分支各自写回一条结果，用 reducer 汇总；Evaluator 消费后清空。
+    outcomes: Annotated[list[TaskOutcome], append_or_reset]
 
     # ---------- 历史（只增不改，用 reducer）----------
     errors: Annotated[list[dict[str, Any]], operator.add]
@@ -90,7 +108,9 @@ class AgentState(TypedDict, total=False):
     # ---------- 循环控制 ----------
     verdict: Verdict | None
     replan_count: int
-    execution_count: int        # 累计工具调用次数，用于全局上限
+    # 用 add reducer：并行分支各自返回 1，由框架累加。
+    # 若用普通字段，多个分支同时写回会互相覆盖，计数偏低。
+    execution_count: Annotated[int, operator.add]
 
     # ---------- 输出 ----------
     execution_summary: dict[str, Any]
@@ -123,9 +143,8 @@ def initial_state(user_request: str) -> AgentState:
     return AgentState(
         user_request=user_request,
         tasks={},
-        current=None,
-        route=None,
-        last=None,
+        dispatch=[],
+        outcomes=[],
         errors=[],
         trace=[],
         verdict=None,

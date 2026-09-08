@@ -13,6 +13,7 @@ Agent 的调用天然是串行的（模型想一步、调一次），没有事�
 from __future__ import annotations
 
 import sys
+import threading
 from typing import Any
 
 from ..protocol import (
@@ -45,6 +46,14 @@ class MiClawClient:
         self._transport = transport or SubprocessTransport(command or DEFAULT_SERVER_COMMAND)
         self._timeout = timeout
         self._next_id = 0
+        # 图层的并行派发会让多个线程同时进来。客户端本身是同步阻塞的：
+        # id 分配不是原子操作（两个线程可能拿到同一个 id，导致响应配对错乱），
+        # 管道写入也可能字节交错破坏按行分帧。加锁保证正确性。
+        #
+        # 代价：MiClaw 调用因此被串行化，图层的并行拿不到实际提速。
+        # 要拿到真实并发，需要传输层支持多路复用（连发多个请求不等回复，
+        # 按 id 配对响应）且服务端并发处理 —— 见清单 A-9。
+        self._lock = threading.RLock()
 
         # 本地会话状态。服务端才是权威，这里只是为了「非法调用不出门」，
         # 省一次进程间往返 —— 前端表单校验和后端校验的关系。
@@ -62,7 +71,11 @@ class MiClawClient:
     # ------------------------------------------------------------
 
     def _request(self, method: Method, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """发一个请求并等它的响应。"""
+        """发一个请求并等它的响应。整段临界区加锁，见 __init__ 的说明。"""
+        with self._lock:
+            return self._request_locked(method, params)
+
+    def _request_locked(self, method: Method, params: dict[str, Any] | None) -> dict[str, Any]:
         self._next_id += 1
         request_id = self._next_id
 
@@ -89,9 +102,10 @@ class MiClawClient:
 
     def _notify(self, method: Method, params: dict[str, Any] | None = None) -> None:
         """发一条通知。没有 id，不等回复。"""
-        self._transport.send(
-            JsonRpcNotification(method=method, params=params).model_dump(exclude_none=True)
-        )
+        with self._lock:
+            self._transport.send(
+                JsonRpcNotification(method=method, params=params).model_dump(exclude_none=True)
+            )
 
     @staticmethod
     def _to_exception(error: JsonRpcError) -> MiClawError:

@@ -1,6 +1,7 @@
 """图节点与端到端测试（任务 DAG 版）。"""
 
 import json
+import re
 
 import pytest
 
@@ -8,6 +9,8 @@ from miagent.client import MiClawClient
 from miagent.graph import build_agent, dag, initial_state
 from miagent.graph.nodes import Deps, evaluator, scheduler
 from miagent.graph.routers import route_after_evaluator, route_after_scheduler
+from langgraph.types import Send
+
 from miagent.graph.state import MAX_REPLANS, TaskOutcome, TaskStatus, new_task
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
@@ -78,22 +81,22 @@ class TestSchedulerIsDeterministic:
         tasks = {"A": new_task("A", "", "echo", {"text": "a"}),
                  "B": new_task("B", "", "echo", {"text": "b"}, ["A"])}
         out = scheduler(self._state(tasks), self._deps(registry))
-        assert out["current"]["id"] == "A"
+        assert [d["task"]["id"] for d in out["dispatch"]] == ["A"]
         assert out["tasks"]["A"]["status"] is TaskStatus.RUNNING
 
     def test_routes_by_tool_source(self, registry):
         local = {"A": new_task("A", "", "echo", {"text": "x"})}
         remote = {"A": new_task("A", "", "system.query_weather", {"when": "今晚"})}
         d = self._deps(registry)
-        assert scheduler(self._state(local), d)["route"] == "local"
-        assert scheduler(self._state(remote), d)["route"] == "miclaw"
+        assert scheduler(self._state(local), d)["dispatch"][0]["route"] == "local"
+        assert scheduler(self._state(remote), d)["dispatch"][0]["route"] == "miclaw"
 
     def test_completion_detected(self, registry):
         tasks = {"A": new_task("A", "", "echo")}
         tasks["A"]["status"] = TaskStatus.DONE
         out = scheduler(self._state(tasks), self._deps(registry))
         # 节点返回的是【部分更新】：没返回 failure 键 = 不改动该字段
-        assert out["current"] is None and out.get("failure") is None
+        assert out["dispatch"] == [] and out.get("failure") is None
 
     def test_cascades_failure_instead_of_deadlocking(self, registry):
         """依赖失败的任务会被级联标记，调度得以收敛而非死等。"""
@@ -102,8 +105,29 @@ class TestSchedulerIsDeterministic:
         tasks["A"]["status"] = TaskStatus.FAILED
         out = scheduler(self._state(tasks), self._deps(registry))
         assert out["tasks"]["B"]["status"] is TaskStatus.FAILED
-        assert out["current"] is None
+        assert out["dispatch"] == []
         assert out.get("failure") is None   # 级联后是"已完成"，不是死锁
+
+
+    def test_dispatches_all_independent_tasks_at_once(self, registry):
+        """互不依赖的任务同一轮全部派发 —— 这是并行的前提。"""
+        tasks = {x: new_task(x, "", "echo", {"text": x}) for x in "ABC"}
+        out = scheduler(self._state(tasks), self._deps(registry))
+        assert {d["task"]["id"] for d in out["dispatch"]} == {"A", "B", "C"}
+
+    def test_miclaw_concurrency_is_capped(self, registry):
+        """MiClaw 侧受握手下发的并发配额限制（清单 C-6）；超出的顺延到下一轮。"""
+        tasks = {x: new_task(x, "", "system.query_weather", {"when": x}) for x in "ABCD"}
+        deps = Deps(llm=FakeLLM(script=[]), registry=registry, max_concurrent_miclaw=2)
+        out = scheduler(self._state(tasks), deps)
+        assert len(out["dispatch"]) == 2
+        assert "2 个因并发配额顺延" in out["trace"][0]
+
+    def test_local_tools_are_not_capped(self, registry):
+        """本地工具不占系统资源配额，也受 GIL 限制并发无收益，故不限流。"""
+        tasks = {x: new_task(x, "", "echo", {"text": x}) for x in "ABCD"}
+        deps = Deps(llm=FakeLLM(script=[]), registry=registry, max_concurrent_miclaw=1)
+        assert len(scheduler(self._state(tasks), deps)["dispatch"]) == 4
 
 
 class TestEvaluator:
@@ -114,8 +138,8 @@ class TestEvaluator:
         s["tasks"] = {"A": new_task("A", "", "echo")}
         s["replan_count"] = replans
         s["execution_count"] = executions
-        s["last"] = TaskOutcome(task_id="A", tool="echo", ok=ok, content="c",
-                                error_code=code, retry_policy=policy, attempt=attempt)
+        s["outcomes"] = [TaskOutcome(task_id="A", tool="echo", ok=ok, content="c",
+                                     error_code=code, retry_policy=policy, attempt=attempt)]
         return evaluator(s, Deps(llm=FakeLLM(script=[]), registry=ToolRegistry()))
 
     def test_success_marks_done(self):
@@ -144,11 +168,42 @@ class TestEvaluator:
         assert out["failure"] == ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
 
 
+    def test_aggregates_multiple_outcomes(self):
+        """并行时一轮可能有多条结果：任一需要重规划，整轮就走 Replanner。"""
+        s = initial_state("t")
+        s["tasks"] = {"A": new_task("A", "", "echo"), "B": new_task("B", "", "echo")}
+        s["outcomes"] = [
+            TaskOutcome(task_id="A", tool="echo", ok=True, content="ok",
+                        error_code=None, retry_policy="none", attempt=1),
+            TaskOutcome(task_id="B", tool="echo", ok=False, content="bad",
+                        error_code="MC-4001", retry_policy="degrade", attempt=1),
+        ]
+        out = evaluator(s, Deps(llm=FakeLLM(script=[]), registry=ToolRegistry()))
+        assert out["verdict"] == "replan"                       # 优先级最高的那个
+        assert out["tasks"]["A"]["status"] is TaskStatus.DONE   # 成功的照常落库
+        assert out["tasks"]["B"]["status"] is TaskStatus.FAILED
+
+    def test_clears_outcomes_after_consuming(self):
+        """消费完必须清空，否则下一轮会重复处理同一批结果。"""
+        s = initial_state("t")
+        s["tasks"] = {"A": new_task("A", "", "echo")}
+        s["outcomes"] = [TaskOutcome(task_id="A", tool="echo", ok=True, content="ok",
+                                     error_code=None, retry_policy="none", attempt=1)]
+        out = evaluator(s, Deps(llm=FakeLLM(script=[]), registry=ToolRegistry()))
+        assert out["outcomes"] == []
+
+
 class TestRouters:
-    def test_after_scheduler(self):
-        assert route_after_scheduler({"current": None}) == "finalizer"
-        assert route_after_scheduler({"current": {}, "route": "local"}) == "local_tool"
-        assert route_after_scheduler({"current": {}, "route": "miclaw"}) == "mcp_executor"
+    def test_after_scheduler_no_work(self):
+        assert route_after_scheduler({"dispatch": []}) == "finalizer"
+
+    def test_after_scheduler_fans_out(self):
+        """返回 Send 列表即并行派发；本地与 MiClaw 可在同一轮扇出到不同节点。"""
+        t = new_task("A", "", "echo")
+        sends = route_after_scheduler({"dispatch": [
+            {"task": t, "route": "local"}, {"task": t, "route": "miclaw"}]})
+        assert [x.node for x in sends] == ["local_tool", "mcp_executor"]
+        assert all(isinstance(x, Send) for x in sends)
 
     def test_after_evaluator(self):
         for v, node in [("success", "scheduler"), ("retry", "scheduler"),
@@ -164,8 +219,8 @@ class TestEndToEnd:
             task("t2", "system.search_nearby", ["t1"], category="餐厅"),
             task("t3", "system.create_event", ["t2"], title="晚餐", when="19:00"))))
         assert out["failure"] is None
-        order = [l for l in out["trace"] if l.startswith("scheduler: 派发")]
-        assert [x.split()[2] for x in order] == ["t1", "t2", "t3"]
+        order = [l for l in out["trace"] if "→ t" in l]
+        assert [re.search(r"→ (t\d)", l).group(1) for l in order] == ["t1", "t2", "t3"]
 
     def test_diamond_exposes_parallel_layer(self, registry):
         """菱形依赖：第二层两个任务同时就绪（当前串行执行，但机会被识别）。"""
@@ -176,7 +231,7 @@ class TestEndToEnd:
             task("t4", "system.create_event", ["t2", "t3"], title="晚餐", when="19:00"))))
         assert out["execution_summary"]["parallel_layers"] == \
             [["t1"], ["t2", "t3"], ["t4"]]
-        assert any("2 个任务就绪" in l for l in out["trace"])
+        assert any("本轮就绪 2 个，派发 2 个" in l for l in out["trace"])
 
     def test_replan_preserves_completed_work(self, registry):
         """重规划不能让已成功的任务重做 —— 端侧每次重做都是真实系统调用。"""

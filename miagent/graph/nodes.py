@@ -27,6 +27,7 @@ from . import dag
 from .schema import TaskPlan, task_plan_model_for
 from .state import (
     MAX_ATTEMPTS_PER_TASK,
+    DispatchItem,
     MAX_REPLANS,
     MAX_TOTAL_EXECUTIONS,
     AgentState,
@@ -41,6 +42,10 @@ from .state import (
 class Deps:
     llm: LLM
     registry: ToolRegistry
+    # MiClaw 侧并发上限，取自握手时下发的 ResourceBudget.max_concurrent_calls。
+    # 本地工具不受此限：它们是 CPU 密集的，受 GIL 限制并发无收益，
+    # 也不占用系统侧资源配额。
+    max_concurrent_miclaw: int = 2
 
 
 # ============================================================
@@ -131,37 +136,47 @@ def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
 def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
     """全部逻辑都是确定性的，不调用模型。
 
-        级联失败 → 判定完成 / 死锁 → 找出就绪任务 → 派发
+        级联失败 → 判定完成 / 死锁 → 找出就绪任务 → 按并发配额派发
     """
     tasks = dag.cascade_failures(state["tasks"])
 
     if dag.is_complete(tasks):
         n_ok, n_bad = len(dag.completed_tasks(tasks)), len(dag.failed_tasks(tasks))
-        return {"tasks": tasks, "current": None, "route": None, "verdict": None,
+        return {"tasks": tasks, "dispatch": [], "verdict": None,
                 "execution_summary": dag.summary(tasks),
                 "trace": [f"scheduler: 全部完成（成功 {n_ok} / 失败 {n_bad}）→ finalizer"]}
 
     if dag.is_deadlocked(tasks):
-        # 还有没跑完的任务，却既无就绪也无在跑 —— 图本身有问题
-        return {"tasks": tasks, "current": None, "route": None, "verdict": None,
+        return {"tasks": tasks, "dispatch": [], "verdict": None,
                 "failure": ErrorCode.AG_DEPENDENCY_UNRESOLVED.value,
                 "execution_summary": dag.summary(tasks),
                 "trace": ["scheduler: 依赖无法满足，调度死锁 → finalizer"]}
 
     ready_ids = dag.ready(tasks)
-    # 串行实现取第一个；ready_ids 长度大于 1 说明这些任务彼此无依赖，
-    # 接 LangGraph 的 Send 做并行派发时，直接用整个列表即可。
-    task_id = ready_ids[0]
-    tasks[task_id]["status"] = TaskStatus.RUNNING
 
-    tool = deps.registry.get(tasks[task_id]["required_tool"])
-    route = "miclaw" if tool is not None and tool.source is ToolSource.MICLAW else "local"
+    # ★ 并行派发：同一轮就绪的任务彼此无依赖，可以同时执行。
+    #   MiClaw 侧受握手时下发的并发配额限制（清单 C-6）；
+    #   本地工具不设限 —— 它们受 GIL 约束，并发也不会更快。
+    dispatch: list[DispatchItem] = []
+    miclaw_used = 0
+    deferred = 0
+    for tid in ready_ids:
+        tool = deps.registry.get(tasks[tid]["required_tool"])
+        route = "miclaw" if tool is not None and tool.source is ToolSource.MICLAW else "local"
+        if route == "miclaw":
+            if miclaw_used >= deps.max_concurrent_miclaw:
+                deferred += 1        # 超出配额的留到下一轮
+                continue
+            miclaw_used += 1
+        tasks[tid]["status"] = TaskStatus.RUNNING
+        dispatch.append(DispatchItem(task=tasks[tid], route=route))
 
-    parallel_note = f"（本轮 {len(ready_ids)} 个任务就绪，串行取首个）" if len(ready_ids) > 1 else ""
+    note = f"，{deferred} 个因并发配额顺延" if deferred else ""
+    names = ", ".join(f"{d['task']['id']}({d['route']})" for d in dispatch)
     return {
-        "tasks": tasks, "current": tasks[task_id], "route": route, "verdict": None,
-        "trace": [f"scheduler: 派发 {task_id} "
-                  f"({tasks[task_id]['required_tool']}) → {route}{parallel_note}"],
+        "tasks": tasks, "dispatch": dispatch, "verdict": None,
+        "trace": [f"scheduler: 本轮就绪 {len(ready_ids)} 个，派发 {len(dispatch)} 个"
+                  f"{note} → {names}"],
     }
 
 
@@ -170,13 +185,18 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
 # ============================================================
 
 
-def execute(state: AgentState, deps: Deps, source: ToolSource) -> dict[str, Any]:
+def execute(payload: dict[str, Any], deps: Deps, source: ToolSource) -> dict[str, Any]:
     """本地工具与 MiClaw 工具的共用执行体。
 
-    现在两条路径一致。将来 MiClaw 侧要加并发批处理、按工具粒度的超时、
+    ★ 这个节点是被 Send 扇出调用的，payload 就是它看到的【全部 state】——
+      里面只有 Send 携带的那一个任务，读不到 tasks、execution_count 等主状态字段。
+      因此返回的是【增量】：outcomes 追加一条、execution_count 加一，
+      由 reducer 汇总。若返回绝对值，多个分支会互相覆盖。
+
+    现在两条路径一致。将来 MiClaw 侧要加批量合并请求、按工具粒度的超时、
     配额预筛时，只在这个函数里分叉，图的结构不用动。
     """
-    task = state["current"]
+    task = payload["task"]
     attempt = task["retry_count"] + 1
     result = deps.registry.invoke(task["required_tool"], task["arguments"])
 
@@ -189,7 +209,7 @@ def execute(state: AgentState, deps: Deps, source: ToolSource) -> dict[str, Any]
         retry_policy=result.retry_policy.value, attempt=attempt,
     )
     mark = "✓" if outcome["ok"] else f"✗ {outcome['error_code']}"
-    return {"last": outcome, "execution_count": state["execution_count"] + 1,
+    return {"outcomes": [outcome], "execution_count": 1,
             "trace": [f"{source.value}: {task['id']} {mark}（第 {attempt} 次）"]}
 
 
@@ -200,42 +220,60 @@ def execute(state: AgentState, deps: Deps, source: ToolSource) -> dict[str, Any]
 _RETRIABLE = {RetryPolicy.BACKOFF.value, RetryPolicy.REHANDSHAKE.value}
 
 
+# 判定优先级：任一任务需要中止就中止，其次重规划，其次重试
+_VERDICT_RANK = {"success": 0, "retry": 1, "replan": 2, "abort": 3}
+
+
 def evaluator(state: AgentState, deps: Deps) -> dict[str, Any]:
     """★ 不调用大模型。
 
     「该重试还是该重规划」由错误码的段位直接决定 —— 传输抖动重试，
     资源不足换方案。这是错误码分段设计的最终兑现。
-    """
-    last = state["last"]
-    tasks = {tid: dict(t) for tid, t in state["tasks"].items()}
-    task = tasks[last["task_id"]]
-    task["retry_count"] = last["attempt"]
 
+    并行执行时本轮可能有多条结果，逐条落库后按优先级聚合成一个判定：
+    只要有任务需要重规划，整轮就走 Replanner —— 它拿到的是完整任务图，
+    能同时看到本轮成功与失败的部分。
+    """
+    tasks = {tid: dict(t) for tid, t in state["tasks"].items()}
+    verdicts: list[str] = []
     failure = None
     errors: list[dict[str, Any]] = []
+    lines: list[str] = []
 
-    if last["ok"]:
-        task["status"], task["result"], verdict = TaskStatus.DONE, last["content"], "success"
-    else:
-        task["error"] = last["error_code"]
-        errors.append({"task": task["id"], "code": last["error_code"],
-                       "attempt": last["attempt"]})
+    for last in state["outcomes"]:
+        task = tasks[last["task_id"]]
+        task["retry_count"] = last["attempt"]
 
-        if state["execution_count"] >= MAX_TOTAL_EXECUTIONS:
-            task["status"], verdict = TaskStatus.FAILED, "abort"
-            task["result"] = last["content"]
-            failure = ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
-        elif last["retry_policy"] in _RETRIABLE and last["attempt"] < MAX_ATTEMPTS_PER_TASK:
-            # 退回 pending，让 Scheduler 下一轮重新派发同一个任务
-            task["status"], verdict = TaskStatus.PENDING, "retry"
-        elif state["replan_count"] < MAX_REPLANS:
-            task["status"], task["result"], verdict = TaskStatus.FAILED, last["content"], "replan"
+        if last["ok"]:
+            task["status"], task["result"] = TaskStatus.DONE, last["content"]
+            verdict = "success"
         else:
-            task["status"], task["result"], verdict = TaskStatus.FAILED, last["content"], "abort"
-            failure = ErrorCode.AG_PLAN_NO_PROGRESS.value
+            task["error"] = last["error_code"]
+            errors.append({"task": task["id"], "code": last["error_code"],
+                           "attempt": last["attempt"]})
+            if state["execution_count"] >= MAX_TOTAL_EXECUTIONS:
+                task["status"], task["result"] = TaskStatus.FAILED, last["content"]
+                verdict = "abort"
+                failure = ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
+            elif (last["retry_policy"] in _RETRIABLE
+                  and last["attempt"] < MAX_ATTEMPTS_PER_TASK):
+                # 退回 pending，让 Scheduler 下一轮重新派发同一个任务
+                task["status"], verdict = TaskStatus.PENDING, "retry"
+            elif state["replan_count"] < MAX_REPLANS:
+                task["status"], task["result"] = TaskStatus.FAILED, last["content"]
+                verdict = "replan"
+            else:
+                task["status"], task["result"] = TaskStatus.FAILED, last["content"]
+                verdict = "abort"
+                failure = ErrorCode.AG_PLAN_NO_PROGRESS.value
 
-    return {"tasks": tasks, "verdict": verdict, "failure": failure, "errors": errors,
-            "trace": [f"evaluator: {task['id']} → {verdict}"
+        verdicts.append(verdict)
+        lines.append(f"{task['id']}→{verdict}")
+
+    final = max(verdicts, key=lambda v: _VERDICT_RANK[v]) if verdicts else "success"
+    return {"tasks": tasks, "verdict": final, "failure": failure, "errors": errors,
+            "outcomes": [],          # 空列表触发 reducer 重置，避免下一轮重复消费
+            "trace": [f"evaluator: {' '.join(lines)} → {final}"
                       + (f"（{failure}）" if failure else "")]}
 
 
@@ -284,7 +322,7 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
                 "trace": [f"replanner: 重规划失败 {e.code}"]}
 
     added = len(merged) - len(terminal)
-    return {"tasks": merged, "current": None, "verdict": None,
+    return {"tasks": merged, "dispatch": [], "verdict": None,
             "replan_count": generation,
             "trace": [f"replanner: 第 {generation} 次重规划，保留 {len(done)} 个已完成、"
                       f"{len(terminal) - len(done)} 个已失败，新增 {added} 个任务"]}
