@@ -1,6 +1,6 @@
 """Agent 执行图：任务 DAG + 确定性调度。
 
-图的拓扑（与设计稿一致）：
+图的拓扑：
 
     START → Planner → Scheduler ─┬→ LocalTool  ─┐
                                  ├→ MCPExecutor ┴→ Evaluator ─┬→ Scheduler

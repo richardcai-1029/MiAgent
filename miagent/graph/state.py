@@ -1,20 +1,14 @@
 """Agent 图的共享状态：任务 DAG 模型。
 
-与线性计划的区别：任务之间有显式依赖，Scheduler 靠依赖解析决定
-「现在能跑哪些」，而不是靠一个递增的游标。这让「并行、分支、汇合」
-成为状态模型本身的能力，而不是事后打的补丁。
+任务之间以 dependencies 显式表达先后关系，Scheduler 靠依赖解析决定
+现在能执行哪些：
 
     task.status == pending 且所有 dependencies 都 done  →  可执行
 
-★ 关于派生字段的说明
-
-  设计稿里列了 completed_tasks / running_tasks / failed_tasks / tool_results。
-  这些信息 tasks 里已经有了（每个 Task 自带 status 与 result），
-  再单独存一份就是同一事实的两份拷贝 —— 一旦某处漏更新，Scheduler 会
-  看到自相矛盾的状态，而且不报错，只是行为诡异。
-
-  因此它们实现为【从 tasks 派生的函数】（见 dag.py），不进 State。
-  可见性一点不少，但不可能不一致。
+tasks 是任务状态的唯一事实来源。「已完成/执行中/已失败的任务」
+「各任务的结果」这类信息都从它派生（见 dag.py），不另存字段 ——
+同一事实存两份，任一处漏更新就会让 Scheduler 看到自相矛盾的状态，
+且不报错，只表现为行为异常。
 """
 
 from __future__ import annotations
@@ -62,8 +56,8 @@ class Task(TypedDict):
 def append_or_reset(old: list[Any], new: list[Any]) -> list[Any]:
     """列表 reducer：空列表表示重置，否则追加。
 
-    并行执行时多个分支各自写回一条结果，需要追加；Evaluator 消费完之后
-    又需要清空。operator.add 只能表达追加，无法表达清空，所以自定义一个。
+    并行执行时多个分支各自写回一条结果，需要追加；Evaluator 消费完
+    本轮结果后需要清空。两种语义都要支持，故不能直接用 operator.add。
     """
     return [] if not new else [*(old or []), *new]
 

@@ -17,7 +17,7 @@
 
 ## 一、实测基线数据
 
-以下为改造前的实测值，作为轻量化改造的对照基准。
+以下为当前实测值，作为轻量化改造的对照基准。
 环境：macOS 24.6 / Python 3.13.9 / langgraph 1.2.10。测量脚本见 `bench/baseline.py`，可复现。
 
 | 指标 | 裸解释器 | MiAgent 协议栈 | `import langgraph.graph` |
@@ -104,7 +104,7 @@ LangChain 的 LLM 抽象假设云端 API（HTTP 重试、流式、token 计费�
 | D-1 | LLM 抽象面向云端 API | 定义最小 LLM 接口，支持 Fake / MiMo 端侧 / 云端三种实现热切换 | **P0** | ✅ | `miagent/llm/`；模板方法统一承担上下文检查与耗时统计，Fake/云端两种实现已可切换 |
 | D-2 | 端侧模型上下文窗口显著小于云端 | 上下文裁剪与摘要策略，超限抛 AG-3001 | P1 | 🟡 | 超限已在请求发出前拦截（AG-3001）；上下文裁剪与摘要策略待做 |
 | D-3 | 无端云协同切换 | 端侧算力不足时路由至云端，需与省电/网络状态联动 | P2 | ⬜ | 项目背景中的「端云协同」目标 |
-| D-5 | 输出格式仅靠提示词约束，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | **P0** | ✅ | `graph/schema.py`、`llm/base.py::complete_structured` |
+| D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | **P0** | ✅ | `graph/schema.py`、`llm/base.py::complete_structured` |
 | D-6 | 无法从推理栈层面保证输出合法 | 端侧推理栈可控，可上约束解码（GBNF 等），使不合 schema 的输出在采样阶段即不可能生成；同一份 schema 可直接转采样语法 | P1 | ⬜ | 落点已就绪，待 MiMo 推理栈确定 |
 | D-4 | 工具描述格式与模型 function calling 格式未打通 | MCP `inputSchema` 本就是 JSON Schema，可直接喂模型，无需转换 | P1 | ✅ | `test_client.py::test_tool_schema_survives_the_wire` |
 
