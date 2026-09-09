@@ -10,7 +10,11 @@ dependencies = [
 [project.optional-dependencies]
 # 图执行引擎。单独拆出来，是为了让 protocol/client 层能在不装 langgraph 的
 # 情况下独立使用 —— 端侧可能只需要协议客户端，不需要完整的图调度。
-graph = ["langgraph>=1.0"]
+#
+# 上限必须保留：并行派发依赖 Send payload 与 reducer 合并这两条语义约定，
+# 它们写在框架文档里而非类型签名里，跨大版本变更后会静默失效而非报错
+# （见 tests/test_framework_contract.py 与适配改造清单的风险分级）。
+graph = ["langgraph>=1.2,<2.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "psutil>=5.9", "grandalf>=0.8"]
 
 [build-system]

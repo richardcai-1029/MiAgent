@@ -2,11 +2,13 @@
 
 | 项目 | MiAgent · 通用 Agent 端侧能力底座 |
 |---|---|
-| 基础框架 | LangGraph 1.2.10（langchain-core 1.5.3） |
+| 基础框架 | LangGraph `>=1.2,<2.0`（实测通过 1.2.10、1.2.11） |
 | 目标生态 | MiClaw 系统级 Agent 生态 · MiMo 端侧大模型 |
-| 文档版本 | v2.0 |
+| 文档版本 | v3.0 |
 
-本清单记录已完成并经测试验证的改造项。每项均给出落地位置与验证方式，可逐条核查。
+本清单记录已完成并经测试验证的改造项。每项均给出落地位置、验证方式与**框架侵入面**，可逐条核查。
+
+侵入面一列标注该项依赖 LangGraph 到什么程度，据此判断框架升级的影响范围与回退路径，分级标准与高风险项详见第二节。
 
 > **关于 MiClaw 规范来源**：MiClaw 技术文档当前不可获取。清单中所有与 MiClaw
 > 交互相关的条目，均依据项目负责人指示——「以标准 MCP (JSON-RPC 2.0) 为基准
@@ -22,79 +24,183 @@
 
 LangGraph 的工具调用是进程内 Python 函数调用，不存在跨进程协议、身份注册与时序约束的概念。这一整块从零建立。
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| A-1 | 无系统级通信协议 | 建立 JSON-RPC 2.0 报文层，`result`/`error` 互斥等协议不变量由校验器强制 | `protocol/messages.py`；`test_protocol.py` |
-| A-2 | 工具调用为进程内直调，无跨进程能力 | stdio 按行分帧传输，不引入 HTTP 栈 | `transport.py`；`test_transport.py` 含真实子进程用例 |
-| A-3 | 无 Agent 身份注册语义 | 扩展 `miclaw/agent.register`，注册为「申请—批准」协商而非单向声明 | `mock_server/server.py::_on_register` |
-| A-4 | 会话无时序约束，任何时刻均可调用工具 | 握手状态机，以声明式状态表强制 `initialize → register → 调用` | `_REQUIRED_STATE`；违规返回 MC-2002 |
-| A-5 | 厂商扩展方法与标准方法无命名隔离 | 扩展方法统一 `miclaw/` 前缀，避免与未来标准 MCP 方法撞名 | `test_protocol.py::test_extensions_are_namespaced` |
-| A-6 | 无协议版本协商 | `initialize` 比对版本，不匹配返回 MC-2001 | `test_mock_server.py::test_version_mismatch` |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| A-1 | 无系统级通信协议 | 建立 JSON-RPC 2.0 报文层，`result`/`error` 互斥等协议不变量由校验器强制 | `protocol/messages.py`；`test_protocol.py` | L0 |
+| A-2 | 工具调用为进程内直调，无跨进程能力 | stdio 按行分帧传输，不引入 HTTP 栈 | `transport.py`；`test_transport.py` 含真实子进程用例 | L0 |
+| A-3 | 无 Agent 身份注册语义 | 扩展 `miclaw/agent.register`，注册为「申请—批准」协商而非单向声明 | `mock_server/server.py::_on_register` | L0 |
+| A-4 | 会话无时序约束，任何时刻均可调用工具 | 握手状态机，以声明式状态表强制 `initialize → register → 调用` | `_REQUIRED_STATE`；违规返回 MC-2002 | L0 |
+| A-5 | 厂商扩展方法与标准方法无命名隔离 | 扩展方法统一 `miclaw/` 前缀，避免与未来标准 MCP 方法撞名 | `test_protocol.py::test_extensions_are_namespaced` | L0 |
+| A-6 | 无协议版本协商 | `initialize` 比对版本，不匹配返回 MC-2001 | `test_mock_server.py::test_version_mismatch` | L0 |
 
 ### B · 错误处理体系
 
 LangChain 工具失败表现为 Python 异常或自由文本，无错误分类，上层无法据此做差异化决策。
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| B-1 | 错误无分层归属，无法区分底层与上层故障 | MC-/AG- 双层码；MC- 经网络回传，AG- 不出进程 | `protocol/errors.py`；测试强制 AG-* 无整数码映射 |
-| B-2 | 错误细节混在文本中，上层无法程序化处理 | 结构化 `error.data.detail`，携带机器可读字段 | `test_client.py::test_detail_survives_the_wire` |
-| B-3 | 错误码在网络两侧无法还原为同一异常 | 客户端按 `data.code` 还原为 `MiClawError`；未知码兜底不崩溃 | `client.py::_to_exception` |
-| B-4 | 无按错误类别的差异化重试策略 | 按千位段位决策：1xxx 退避重试、4xxx 延迟或降级、3xxx/5xxx 不重试 | `protocol/errors.py::retry_policy`；`test_tools.py::TestRetryPolicyByBand` |
-| B-6 | 业务失败（`isError`）与调用失败（JSON-RPC error）未在上层区分 | 上层据此选择「让模型换方案」还是「退避重试」 | `client.py::call_tool` 将 isError 映射为 MC-3003；见 `test_business_failure_differs_from_call_failure` |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| B-1 | 错误无分层归属，无法区分底层与上层故障 | MC-/AG- 双层码；MC- 经网络回传，AG- 不出进程 | `protocol/errors.py`；测试强制 AG-* 无整数码映射 | L0 |
+| B-2 | 错误细节混在文本中，上层无法程序化处理 | 结构化 `error.data.detail`，携带机器可读字段 | `test_client.py::test_detail_survives_the_wire` | L0 |
+| B-3 | 错误码在网络两侧无法还原为同一异常 | 客户端按 `data.code` 还原为 `MiClawError`；未知码兜底不崩溃 | `client.py::_to_exception` | L0 |
+| B-4 | 无按错误类别的差异化重试策略 | 按千位段位决策：1xxx 退避重试、4xxx 延迟或降级、3xxx/5xxx 不重试 | `protocol/errors.py::retry_policy`；`test_tools.py::TestRetryPolicyByBand` | L0 |
+| B-6 | 业务失败（`isError`）与调用失败（JSON-RPC error）未在上层区分 | 上层据此选择「让模型换方案」还是「退避重试」 | `client.py::call_tool` 将 isError 映射为 MC-3003；见 `test_business_failure_differs_from_call_failure` | L0 |
 
 ### C · 端侧资源约束
 
 LangGraph 面向云端设计，不存在内存配额、并发上限等概念。这是端侧相对云端多出的一整个约束维度。
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| C-2 | 无资源配额下发机制 | 握手时下发 `ResourceBudget`，Agent 全程受其约束 | `protocol/messages.py::ResourceBudget` |
-| C-3 | 工具无资源画像，无法预判开销 | 工具申报 `estimated_memory_mb`，服务端执行前校验 | 超配额返回 MC-4001，见 `test_memory_limit` |
-| C-6 | `max_concurrent_calls` 无执行机制 | 当前同步实现天然串行；如引入并发需加信号量，否则应移除该字段 | `scheduler` 按 `max_concurrent_calls` 限流 MiClaw 派发，超出者顺延；本地工具受 GIL 限制不设限 |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| C-2 | 无资源配额下发机制 | 握手时下发 `ResourceBudget`，Agent 全程受其约束 | `protocol/messages.py::ResourceBudget` | L0 |
+| C-3 | 工具无资源画像，无法预判开销 | 工具申报 `estimated_memory_mb`，服务端执行前校验 | 超配额返回 MC-4001，见 `test_memory_limit` | L0 |
+| C-6 | `max_concurrent_calls` 无执行机制 | 当前同步实现天然串行；如引入并发需加信号量，否则应移除该字段 | `scheduler` 按 `max_concurrent_calls` 限流 MiClaw 派发，超出者顺延；本地工具受 GIL 限制不设限 | L1 |
 
 ### D · MiMo 模型接入
 
 LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可靠性特征差异较大。
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| D-1 | LLM 抽象面向云端 API | 定义最小 LLM 接口，支持 Fake / MiMo 端侧 / 云端三种实现热切换 | `miagent/llm/`；模板方法统一承担上下文检查与耗时统计，Fake/云端两种实现已可切换 |
-| D-4 | 工具描述格式与模型 function calling 格式未打通 | MCP `inputSchema` 本就是 JSON Schema，可直接喂模型，无需转换 | `test_client.py::test_tool_schema_survives_the_wire` |
-| D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `graph/schema.py`、`llm/base.py::complete_structured` |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| D-1 | LLM 抽象面向云端 API | 定义最小 LLM 接口，支持 Fake / MiMo 端侧 / 云端三种实现热切换 | `miagent/llm/`；模板方法统一承担上下文检查与耗时统计，Fake/云端两种实现已可切换 | L0 |
+| D-4 | 工具描述格式与模型 function calling 格式未打通 | MCP `inputSchema` 本就是 JSON Schema，可直接喂模型，无需转换 | `test_client.py::test_tool_schema_survives_the_wire` | L0 |
+| D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `graph/schema.py`、`llm/base.py::complete_structured` | L0 |
 
 ### E · 依赖裁剪与轻量化
 
 端侧存在只需协议客户端的部署形态，不应为图引擎付出常驻内存与冷启动的代价。
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| E-1 | 协议层与客户端不应绑定图引擎 | `langgraph` 拆为可选依赖 `[graph]`，协议/传输/客户端仅依赖 pydantic | `pyproject.toml`；60 个测试在无 langgraph 时仍可运行 |
-| E-7 | 图引擎随包导入被无条件加载，纯逻辑模块也要付出其常驻代价 | `miagent.graph` 以 PEP 562 惰性导出 `build_agent`：依赖解析、状态定义、计划 schema 均为纯 Python，不触发图引擎加载 | 该包导入代价由 873 模块 / 69.2 MB 降至 141 模块 / 29.2 MB |
-| E-8 | 缺少防止分层退化的机制 | 自动化守卫：瘦客户端形态涉及的九个模块，在独立子进程中导入后不得出现 langgraph / langchain_core / langsmith / requests 等任一重依赖 | `tests/test_layering.py`，11 条用例 |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| E-1 | 协议层与客户端不应绑定图引擎 | `langgraph` 拆为可选依赖 `[graph]`，协议/传输/客户端仅依赖 pydantic | `pyproject.toml`；60 个测试在无 langgraph 时仍可运行 | L0 |
+| E-7 | 图引擎随包导入被无条件加载，纯逻辑模块也要付出其常驻代价 | `miagent.graph` 以 PEP 562 惰性导出 `build_agent`：依赖解析、状态定义、计划 schema 均为纯 Python，不触发图引擎加载 | 该包导入代价由 873 模块 / 69.2 MB 降至 141 模块 / 29.2 MB | L0 |
+| E-8 | 缺少防止分层退化的机制 | 双向守卫：瘦客户端形态涉及的九个模块，在独立子进程中导入后既不得出现 langgraph / langchain_core / langsmith / requests 等已知重依赖（黑名单），加载的第三方包也不得超出 pydantic 及其依赖（白名单） | `tests/test_layering.py`，21 条用例 | L0 · 版本敏感 |
 
 ### F · 工具体系适配
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| F-1 | 本地工具（进程内函数）与 MiClaw 系统工具（走协议）无统一抽象 | 统一 Tool 基类 + 注册表，屏蔽调用方式差异，保留失败模式差异 | `miagent/tools/`；87 个测试覆盖两类工具的统一入口 |
-| F-6 | 无工具开发规范文档 | 输出标准化开发规范，含声明字段、错误约定、测试要求 | `docs/03-tool-spec.md` |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| F-1 | 本地工具（进程内函数）与 MiClaw 系统工具（走协议）无统一抽象 | 统一 Tool 基类 + 注册表，屏蔽调用方式差异，保留失败模式差异 | `miagent/tools/`；87 个测试覆盖两类工具的统一入口 | L0 |
+| F-6 | 无工具开发规范文档 | 输出标准化开发规范，含声明字段、错误约定、测试要求 | `docs/03-tool-spec.md` | L0 |
 
 ### G · 任务调度
 
-| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 |
-|---|---|---|---|
-| G-2 | 无步数与预算上限，模型可能陷入死循环 | 落地 AG-1002（超步数）、AG-1003（无进展）、AG-4002（超预算） | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003 |
-| G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、五态生命周期、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `graph/dag.py`；`test_dag.py` 25 条用例覆盖边界 |
-| G-5 | 无依赖关系的任务仍被串行执行，浪费 IPC 等待时间 | 以 LangGraph Send 并行派发同层任务；需为 tasks 定义按 id 合并的 reducer，避免多分支写回互相覆盖 | `routers.py` 返回 Send 列表扇出；outcomes 与 execution_count 用 reducer 汇总；实测无依赖任务提速 3.00x |
-| G-6 | 任务图非法（依赖缺失/自依赖/成环）会表现为莫名死锁 | Kahn 拓扑排序在执行前校验，映射 AG-1004；运行期死锁映射 AG-1005 | `dag.validate()`；`test_cyclic_plan_rejected_before_execution` |
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| G-2 | 无步数与预算上限，模型可能陷入死循环 | 落地 AG-1002（超步数）、AG-1003（无进展）、AG-4002（超预算） | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003 | L1 |
+| G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、五态生命周期、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `graph/dag.py`；`test_dag.py` 25 条用例覆盖边界 | L0 |
+| G-5 | 无依赖关系的任务仍被串行执行，浪费 IPC 等待时间 | 以 LangGraph Send 并行派发同层任务；需为 tasks 定义按 id 合并的 reducer，避免多分支写回互相覆盖 | `routers.py` 返回 Send 列表扇出；outcomes 与 execution_count 用 reducer 汇总；实测无依赖任务提速 3.00x | **L2 · 高** |
+| G-6 | 任务图非法（依赖缺失/自依赖/成环）会表现为莫名死锁 | Kahn 拓扑排序在执行前校验，映射 AG-1004；运行期死锁映射 AG-1005 | `dag.validate()`；`test_cyclic_plan_rejected_before_execution` | L0 |
+
+
+### H · 框架版本风险控制
+
+LangGraph 的部分行为约定写在文档而非类型签名里，升级失配时不报错、只表现为行为异常。
+本组的目的是把这类风险变成可检测、可定位、影响范围可枚举的东西。
+
+| 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
+|---|---|---|---|---|
+| H-1 | 框架接触面无约束，任何模块都可 import langgraph，升级的影响范围不可枚举 | AST 扫描守卫，只允许构图与路由两个模块 import langgraph；新增即失败并要求更新风险分级 | `test_layering.py::test_framework_surface_is_confined` | L0 |
+| H-2 | 所依赖的框架语义约定无测试覆盖，升级失配时静默失效 | 框架契约测试：以最小图逐条固化 Send payload 范围、reducer 合并时机、条件边返回类型、中断恢复，不引用业务模块 | `tests/test_framework_contract.py`，5 条用例 | L1（仅测试代码） |
+| H-3 | 版本声明无上限，升级可在无人察觉时发生 | 收紧为 `langgraph>=1.2,<2.0`，实测通过版本记录在文档抬头 | `pyproject.toml` | L0 |
 
 ---
 
-## 二、实测数据
+## 二、框架侵入面与风险分级
+
+改造项对 LangGraph 的依赖程度差异很大：有的完全不碰框架，有的依赖框架未写进类型签名的行为约定。
+后者才是版本升级时真正的风险来源，需要单独标记。
+
+### 分级标准
+
+| 级别 | 含义 | 升级失配时的表现 |
+|---|---|---|
+| **L0** | 不 import langgraph。纯协议、纯函数、打包配置 | 无影响 |
+| **L1** | 只用公开 API：`StateGraph` / `add_node` / `add_edge` / `add_conditional_edges` / `compile` | 显式失败：签名或行为变更会直接报错 |
+| **L2** | 依赖框架的**语义约定**——写在框架文档里、不在类型签名里 | **静默失败**：不抛异常，只表现为行为异常 |
+| **L3** | 侵入内核：改框架源码、monkey patch、依赖私有模块 | 极可能直接崩溃，且无官方兼容承诺 |
+
+分级依据不是改造的工作量，而是**升级失配时能否被发现**。L1 会报错，修就是了；
+L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成本高得多。
+
+### 分布
+
+| 级别 | 项数 | 编号 |
+|---|---|---|
+| L0 | 25 | A 组全部、B 组全部、C-2、C-3、D 组全部、E 组全部、F 组全部、G-4、G-6、H-1、H-3 |
+| L1 | 3 | C-6、G-2、H-2 |
+| L2 | 1 | **G-5** |
+| L3 | 0 | — |
+
+合计 29 项：第 1 周完成 26 项，本节的 H 组 3 项为风险分级过程中识别并补齐。
+
+**当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
+这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，
+升级面因此收敛得很窄。
+
+框架接触面同样是收敛的：整个 `miagent/` 下只有 `graph/build.py`（构图）与 `graph/routers.py`（路由）
+两个文件 import langgraph。这一点由 `test_framework_surface_is_confined` 用 AST 扫描强制——
+新增第三个框架依赖会立刻测试失败，并要求同步更新本节的风险分级。接触面可枚举，回退才谈得上可行。
+
+### 高风险项 G-5：并行任务派发
+
+G-5 以 `Send` 扇出同层任务，依赖两条**语义约定**：
+
+1. **Send 的 payload 就是被调用节点看到的全部 state。** 执行节点因此读不到 `tasks` 与
+   `execution_count`，只能返回增量。
+2. **并行分支的返回值经 reducer 合并。** `outcomes` 用 `append_or_reset` 追加，
+   `execution_count` 用 `operator.add` 累加。
+
+两条都不在类型签名里。失配后的表现是静默的：
+
+| 约定失效 | 静默表现 |
+|---|---|
+| payload 改为与主 state 合并 | 节点若改回返回绝对值，多分支写回互相覆盖，计数与结果都偏 |
+| 整数 reducer 不再累加 | `execution_count` 计数偏低，`MAX_TOTAL_EXECUTIONS` 这道循环出口失效（G-2 随之失效） |
+| 空列表返回被视为「无更新」而跳过合并 | `outcomes` 不再被清空，Evaluator 下一轮重复消费上一轮结果 |
+
+**检测手段**：`tests/test_framework_contract.py` 用最小图逐条固化上述约定，
+不引用任何业务模块。升级时先跑这一组，失败能直接指出是哪条约定变了，
+不必从业务测试的失败里反推。
+
+**回退路径**：G-5 的框架相关部分只在 `routers.py` 的一个函数里。
+调度决策（哪些任务就绪、并发配额如何分配）都在 `scheduler` 节点与 `dag.py` 的纯函数中，
+与框架无关。因此降级为串行执行只需改路由返回值，任务图与调度语义不受影响。
+
+### 版本敏感项 E-8：分层守卫的依赖假设
+
+E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / urllib3 / websockets）
+编码了一项对 LangGraph 依赖树的假设。框架换用新的传递依赖后，黑名单不会报错，只会漏判——
+分层退化了也测不出来，失效方式同样是静默的。
+
+本版本补充了互补的白名单守卫：瘦客户端形态加载的第三方顶层包不得超出 pydantic 及其依赖，
+多出任何一个即失败。黑名单负责给出可读的失败原因，白名单负责保证不漏。
+
+### 预留接口
+
+`build_agent` 将 `compile_kwargs` 透传给框架的 `compile()`，用于 `checkpointer` 与
+`interrupt_before`——端侧据此在调用系统能力之前暂停、交用户确认后恢复。该路径属 L1，
+其可用性由 `test_interrupt_before_pauses_and_resumes` 固化。
+
+### 版本策略
+
+| 措施 | 内容 |
+|---|---|
+| 版本区间 | `langgraph>=1.2,<2.0`。上限不可省略：L2 项跨大版本失配是静默的 |
+| 实测记录 | 通过版本记录在本文档抬头，升级后需更新 |
+| 升级流程 | 先跑框架契约测试定位约定变更，再跑接触面守卫确认依赖面未扩大，最后跑全量测试与 `bench/baseline.py` |
+
+> **一次已发生的漂移**：原依赖声明为 `langgraph>=1.0`，无上限。
+> 环境中的实际版本已由文档记录的 1.2.10 漂移至 1.2.11，全量测试通过因而未被察觉。
+> 本次重测 `bench/baseline.py`，两版本的资源数据一致，故第三节数据仍然有效。
+> 这次漂移没有造成问题，但它说明无上限的版本声明会让升级在无人知晓的情况下发生——
+> 上限与契约测试的意义正在于此。
+
+---
+
+## 三、实测数据
 
 按部署形态测量。端侧的实际约束是「这一形态的进程常驻多少内存」，按单个模块统计没有意义。
-环境：macOS 24.6 / Python 3.13.9 / langgraph 1.2.10。测量脚本 `bench/baseline.py`，可复现；
+环境：macOS 24.6 / Python 3.13.9 / langgraph 1.2.11（1.2.10 上的原始测量结果与此一致）。测量脚本 `bench/baseline.py`，可复现；
 内存取三次运行的中位数、耗时取最小值，故下表为取整后的近似值。
 
 | 部署形态 | 常驻内存 | 冷启动 | 加载模块数 | 其中云端/网络相关 |
@@ -129,9 +235,9 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 
 ---
 
-## 三、验证方式
+## 四、验证方式
 
-规约与改造的全部约定均以测试代码固化，当前累计 167 条用例。
+规约与改造的全部约定均以测试代码固化，当前累计 182 条用例。
 
 | 验证项 | 方式 |
 |---|---|
@@ -142,4 +248,6 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 | 资源约束 | 超出下发配额的工具调用被拦截，detail 中给出实际值与上限 |
 | 依赖解析 | 就绪判定、级联失败、完成与死锁检测、环检测均以纯函数实现，边界情况穷举覆盖 |
 | 分层隔离 | 瘦客户端形态涉及的九个模块在独立子进程中导入后，不出现图引擎及其云端传递依赖 |
+| 框架契约 | 所依赖的 LangGraph 语义以最小图逐条固化，升级失配可定位到具体约定 |
+| 接触面收敛 | AST 扫描确认只有构图与路由两个模块 import langgraph |
 | 可测试性 | 每一层可独立测试，不依赖上层 |

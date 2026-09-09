@@ -290,3 +290,46 @@ class TestEndToEnd:
     def test_empty_plan_goes_straight_to_finalizer(self, registry):
         out = run(registry, "你好", llm_for(plan(), answer="你好，有什么可以帮你？"))
         assert out["tasks"] == {} and out["final_answer"]
+
+
+# ============================================================
+# 约束守卫：模型的调用范围
+# ============================================================
+
+
+def _functions_touching(attr_owner: str, attr: str, path) -> set[str]:
+    """AST 扫描：找出哪些顶层函数里出现了 `attr_owner.attr` 形式的访问。"""
+    import ast
+
+    hits = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for fn in tree.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Attribute) and node.attr == attr
+                    and isinstance(node.value, ast.Name) and node.value.id == attr_owner):
+                hits.add(fn.name)
+    return hits
+
+
+def test_model_is_confined_to_planning_nodes():
+    """模型只允许在规划与收尾环节被调用。
+
+    调度、执行、评估三个环节要回答的问题都有确定答案——依赖是否满足、
+    是否超出重试上限、是否全部完成、该重试还是该换方案。用模型去猜一个
+    我们确定知道答案的问题，既慢又不可复现，端侧尤其付不起这个代价。
+
+    这条约束此前只写在文档里。文档约束不会在被破坏时报警，故在此固化：
+    新加的节点若持有模型引用，本用例立即失败。
+    """
+    from pathlib import Path
+
+    nodes_py = Path(__file__).resolve().parent.parent / "miagent" / "graph" / "nodes.py"
+    touching = _functions_touching("deps", "llm", nodes_py)
+
+    # _plan 是 Planner 与 Replanner 共用的规划实现；finalizer 生成给用户的回答。
+    assert touching == {"_plan", "finalizer"}, (
+        f"模型调用范围发生变化，当前出现在 {sorted(touching)}。"
+        "调度、执行、评估环节的判断均有确定答案，必须由纯函数承担。"
+    )

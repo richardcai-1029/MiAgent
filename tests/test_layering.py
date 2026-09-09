@@ -75,3 +75,79 @@ def test_light_profile_does_not_regress():
                             capture_output=True, text=True, check=True).stdout)
     assert rss <= LIGHT_PROFILE_TRIPWIRE_MB, (
         f"瘦客户端常驻 {rss}MB，超过回归哨兵 {LIGHT_PROFILE_TRIPWIRE_MB}MB")
+
+
+# ============================================================
+# 框架接触面守卫
+# ============================================================
+
+# 允许 import langgraph 的模块。图的组装与路由必须用框架 API，
+# 其余各层都不应该碰到它。
+FRAMEWORK_FACING = {"miagent/graph/build.py", "miagent/graph/routers.py"}
+
+
+def _modules_importing(package: str, root: str = "miagent") -> set[str]:
+    """用 AST 找出真正 import 了该包的模块。
+
+    不用文本匹配 —— 文档字符串与注释里出现的包名会被误判。
+    """
+    import ast
+    from pathlib import Path
+
+    hits = set()
+    base = Path(__file__).resolve().parent.parent
+    for path in sorted((base / root).rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(n == package or n.startswith(package + ".") for n in names):
+                hits.add(path.relative_to(base).as_posix())
+    return hits
+
+
+def test_framework_surface_is_confined():
+    """只有图组装与路由两个模块可以 import langgraph。
+
+    接触面必须可枚举，否则谈不上版本回退：升级失配时需要知道
+    到底有哪几处要改。守卫在这里，新增的框架依赖会立刻暴露。
+    """
+    actual = _modules_importing("langgraph")
+    assert actual == FRAMEWORK_FACING, (
+        f"框架接触面发生变化。预期 {sorted(FRAMEWORK_FACING)}，实际 {sorted(actual)}。"
+        "新增框架依赖需同步评估其版本敏感度，并更新适配改造清单的风险分级。"
+    )
+
+
+# 瘦客户端形态允许加载的第三方顶层包。
+# 与 FORBIDDEN 黑名单互补：黑名单只拦已知的重依赖，框架换用新的传递依赖时
+# 会静默漏判；白名单则是「多出任何一个都失败」，失效方式是显式的。
+ALLOWED_THIRD_PARTY = {"miagent", "pydantic", "pydantic_core",
+                       "annotated_types", "typing_extensions", "typing_inspection"}
+
+# 以导入前的模块快照为基线做差：解释器启动时注入的东西（如 sitecustomize）
+# 不属于本次导入的代价，也不应因环境不同而影响判定。
+WHITELIST_PROBE = """
+import sys
+baseline = {{m.split('.')[0] for m in sys.modules}}
+import importlib
+importlib.import_module({module!r})
+tops = {{m.split('.')[0] for m in sys.modules if not m.startswith('_')}}
+print(",".join(sorted(tops - baseline - sys.stdlib_module_names)))
+"""
+
+
+@pytest.mark.parametrize("module", LIGHT_MODULES)
+def test_light_layer_loads_no_unexpected_third_party(module):
+    out = subprocess.run(
+        [sys.executable, "-c", WHITELIST_PROBE.format(module=module)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    loaded = set(out.split(",")) if out else set()
+    assert loaded <= ALLOWED_THIRD_PARTY, (
+        f"导入 {module} 后加载了预期之外的第三方包：{sorted(loaded - ALLOWED_THIRD_PARTY)}"
+    )
