@@ -34,6 +34,10 @@ from ..transport import SubprocessTransport, log
 DEFAULT_SERVER_COMMAND = [sys.executable, "-m", "miagent.mock_server"]
 
 
+# 用哨兵而非 None 作 timeout 的缺省值：None 是合法取值，表示"一直等"。
+_UNSET: Any = object()
+
+
 class MiClawClient:
     def __init__(
         self,
@@ -70,12 +74,18 @@ class MiClawClient:
     # 底层收发
     # ------------------------------------------------------------
 
-    def _request(self, method: Method, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """发一个请求并等它的响应。整段临界区加锁，见 __init__ 的说明。"""
-        with self._lock:
-            return self._request_locked(method, params)
+    def _request(self, method: Method, params: dict[str, Any] | None = None,
+                 timeout: float | None = _UNSET) -> dict[str, Any]:
+        """发一个请求并等它的响应。整段临界区加锁，见 __init__ 的说明。
 
-    def _request_locked(self, method: Method, params: dict[str, Any] | None) -> dict[str, Any]:
+        timeout 缺省时用连接级超时；工具调用会传入握手时下发的单次调用配额。
+        """
+        with self._lock:
+            return self._request_locked(
+                method, params, self._timeout if timeout is _UNSET else timeout)
+
+    def _request_locked(self, method: Method, params: dict[str, Any] | None,
+                        timeout: float | None) -> dict[str, Any]:
         self._next_id += 1
         request_id = self._next_id
 
@@ -84,7 +94,7 @@ class MiClawClient:
         )
 
         while True:
-            raw = self._transport.receive(timeout=self._timeout)
+            raw = self._transport.receive(timeout=timeout)
             if raw is None:
                 raise MiClawError(ErrorCode.MC_TRANSPORT_CLOSED, "服务端在响应前关闭了连接")
 
@@ -175,13 +185,29 @@ class MiClawClient:
         丢掉这个字段会让业务失败被当成成功，是很隐蔽的 bug。
         """
         self._require(self._registered, "完成 agent.register 注册")
-        result = self._request(Method.TOOLS_CALL, {"name": name, "arguments": arguments or {}})
+        result = self._request(Method.TOOLS_CALL,
+                               {"name": name, "arguments": arguments or {}},
+                               timeout=self.call_timeout)
         parts = [c.get("text", "") for c in result.get("content", []) if c.get("type") == "text"]
         text = "\n".join(parts)
         if result.get("isError"):
             raise MiClawError(ErrorCode.MC_TOOL_EXECUTION_FAILED, text,
                               detail={"tool": name, "kind": "business_failure"})
         return text
+
+    @property
+    def call_timeout(self) -> float | None:
+        """单次工具调用的超时秒数，取自握手时下发的资源配额。
+
+        与连接级超时是两回事：后者约束的是"这条链路多久没动静就认为断了"，
+        前者约束的是"系统愿意为一次工具调用等多久"。一个工具卡住不应该
+        拖到整条链路的超时才被发现 —— 端侧的调用配额本就更紧。
+
+        握手尚未完成、或服务端未下发配额时退回连接级超时。
+        """
+        if self.budget is None:
+            return self._timeout
+        return self.budget.max_call_timeout_ms / 1000
 
     def query_resource(self) -> dict[str, Any]:
         self._require(self._handshaked, "完成 initialize 握手")

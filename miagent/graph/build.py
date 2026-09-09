@@ -14,18 +14,22 @@ from .state import AgentState
 
 
 def build_agent(llm: LLM, registry: ToolRegistry,
-                max_concurrent_miclaw: int = 2, **compile_kwargs):
+                max_concurrent_miclaw: int = 2, retry_delay_ms: int = 200,
+                **compile_kwargs):
     """构建 Agent 图。
 
     max_concurrent_miclaw 应取自握手时下发的 ResourceBudget.max_concurrent_calls，
     限制同一轮并行派发的 MiClaw 调用数（清单 C-6）。本地工具不受此限。
+
+    retry_delay_ms 是重试前的退避时长，默认值无外部依据，见 Deps 的说明。
 
     compile_kwargs 透传给 LangGraph 的 compile()，
     例如 checkpointer=... 与 interrupt_before=["mcp_executor"]
     可以在调用系统能力前暂停，交由用户确认。
     """
     deps = nodes.Deps(llm=llm, registry=registry,
-                      max_concurrent_miclaw=max_concurrent_miclaw)
+                      max_concurrent_miclaw=max_concurrent_miclaw,
+                      retry_delay_ms=retry_delay_ms)
     bind = lambda fn, **kw: partial(fn, deps=deps, **kw)  # noqa: E731
 
     g = StateGraph(AgentState)

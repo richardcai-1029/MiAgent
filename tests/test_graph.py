@@ -7,7 +7,7 @@ import pytest
 
 from miagent.client import MiClawClient
 from miagent.graph import build_agent, dag, initial_state
-from miagent.graph.nodes import Deps, evaluator, scheduler
+from miagent.graph.nodes import Deps, evaluator, execute, scheduler
 from miagent.graph.routers import route_after_evaluator, route_after_scheduler
 from langgraph.types import Send
 
@@ -15,7 +15,7 @@ from miagent.graph.state import MAX_REPLANS, TaskOutcome, TaskStatus, new_task
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
 from miagent.protocol import ErrorCode
-from miagent.tools import ToolRegistry, tool
+from miagent.tools import ToolRegistry, ToolSource, tool
 from miagent.transport import LoopbackTransport
 
 PERMS = ["calendar.read", "calendar.write", "location.fine", "screen.capture"]
@@ -73,8 +73,10 @@ def llm_for(first, replan=None, answer="完成"):
 
 
 def run(registry, request, llm):
-    return build_agent(llm, registry).invoke(initial_state(request),
-                                             {"recursion_limit": 80})
+    # 退避设为 0：重试行为由 TestRetryBackoff 单独验证，
+    # 端到端用例不必为此真的等待。
+    return build_agent(llm, registry, retry_delay_ms=0).invoke(
+        initial_state(request), {"recursion_limit": 80})
 
 
 class TestSchedulerIsDeterministic:
@@ -416,3 +418,34 @@ class TestToolChaining:
         assert out["tasks"]["t3"]["status"] is TaskStatus.DONE
         assert out["tasks"]["t3"]["result"] == "A|B"
         assert dag.parallel_layers(out["tasks"]) == [["t1", "t2"], ["t3"]]
+
+
+class TestRetryBackoff:
+    """重试前先退避。RetryPolicy.BACKOFF 要求「退避后重试」，
+    此前是下一轮立即重发 —— 策略名存实亡。"""
+
+    def _deps(self, registry, waits):
+        return Deps(llm=FakeLLM(script=[]), registry=registry,
+                    retry_delay_ms=250, sleep=waits.append)
+
+    def test_first_attempt_does_not_wait(self, registry):
+        waits = []
+        payload = {"task": new_task("t1", "任务 t1", "echo", {"text": "x"})}
+        out = execute(payload, self._deps(registry, waits), ToolSource.LOCAL)
+        assert waits == []
+        assert out["outcomes"][0]["ok"]
+
+    def test_retry_waits_before_reissuing(self, registry):
+        waits = []
+        task = new_task("t1", "任务 t1", "echo", {"text": "x"})
+        task["retry_count"] = 1                 # 已失败过一次，本次是重试
+        out = execute({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
+        assert waits == [0.25], "重试没有退避，或退避时长换算错误"
+        assert out["outcomes"][0]["attempt"] == 2
+
+    def test_wait_is_recorded_in_the_trace(self, registry):
+        waits = []
+        task = new_task("t1", "任务 t1", "echo", {"text": "x"})
+        task["retry_count"] = 1
+        out = execute({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
+        assert "退避 250ms" in out["trace"][0]

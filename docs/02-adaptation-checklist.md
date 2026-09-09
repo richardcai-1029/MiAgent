@@ -44,6 +44,7 @@ LangChain 工具失败表现为 Python 异常或自由文本，无错误分类�
 | B-3 | 错误码在网络两侧无法还原为同一异常 | 客户端按 `data.code` 还原为 `MiClawError`；未知码兜底不崩溃 | `client.py::_to_exception` | L0 |
 | B-4 | 无按错误类别的差异化重试策略 | 按千位段位决策：1xxx 退避重试、4xxx 延迟或降级、3xxx/5xxx 不重试 | `protocol/errors.py::retry_policy`；`test_tools.py::TestRetryPolicyByBand` | L0 |
 | B-6 | 业务失败（`isError`）与调用失败（JSON-RPC error）未在上层区分 | 上层据此选择「让模型换方案」还是「退避重试」 | `client.py::call_tool` 将 isError 映射为 MC-3003；见 `test_business_failure_differs_from_call_failure` | L0 |
+| B-7 | `RetryPolicy.BACKOFF` 声明「退避后重试」，实现却是下一轮立即重发 —— 传输抖动与资源占用这两类失败在立即重发时状况还没来得及改变 | 重试前等待；等待实现可注入，使退避行为可被测试观察而不必真的等 | `nodes.execute`；`test_graph.py::TestRetryBackoff` | L0 |
 
 ### C · 端侧资源约束
 
@@ -53,6 +54,7 @@ LangGraph 面向云端设计，不存在内存配额、并发上限等概念。�
 |---|---|---|---|---|
 | C-2 | 无资源配额下发机制 | 握手时下发 `ResourceBudget`，Agent 全程受其约束 | `protocol/messages.py::ResourceBudget` | L0 |
 | C-3 | 工具无资源画像，无法预判开销 | 工具申报 `estimated_memory_mb`，服务端执行前校验 | 超配额返回 MC-4001，见 `test_memory_limit` | L0 |
+| C-7 | `max_call_timeout_ms` 无执行机制：所有请求一律用连接级超时，一个工具卡住要拖到整条链路超时才被发现 | 工具调用改用配额下发的单次调用超时，其余请求仍用连接级超时；握手未完成时退回连接级 | `client.call_timeout`；`test_client.py::TestPerCallTimeout` | L0 |
 | C-6 | `max_concurrent_calls` 无执行机制 | 当前同步实现天然串行；如引入并发需加信号量，否则应移除该字段 | `scheduler` 按 `max_concurrent_calls` 限流 MiClaw 派发，超出者顺延；本地工具受 GIL 限制不设限 | L1 |
 
 ### D · MiMo 模型接入
@@ -128,12 +130,12 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 27 | A 组全部、B 组全部、C-2、C-3、D 组全部、E 组全部、F 组全部、G-4、G-6、G-7、H-1、H-3 |
+| L0 | 29 | A 组全部、B 组全部、C-2、C-3、C-7、D 组全部、E 组全部、F 组全部、G-4、G-6、G-7、H-1、H-3 |
 | L1 | 3 | C-6、G-2、H-2 |
 | L2 | 1 | **G-5** |
 | L3 | 0 | — |
 
-合计 31 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，F-7 与 G-7 为第 2 周新增。
+合计 33 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，B-7、C-7、F-7、G-7 为第 2 周新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，
@@ -239,7 +241,7 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 
 ## 四、验证方式
 
-规约与改造的全部约定均以测试代码固化，当前累计 239 条用例。
+规约与改造的全部约定均以测试代码固化，当前累计 246 条用例。
 
 | 验证项 | 方式 |
 |---|---|

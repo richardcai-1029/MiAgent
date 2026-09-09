@@ -200,6 +200,12 @@ def execute(payload: dict[str, Any], deps: Deps, source: ToolSource) -> dict[str
     """
     task = payload["task"]
     attempt = task["retry_count"] + 1
+
+    # 退避。能走到重试的只有段位 1（传输抖动）与段位 2（协议状态）两类失败，
+    # 它们的共同点是「过一会儿可能就好了」；立即重发时状况还没来得及改变。
+    if attempt > 1:
+        deps.sleep(deps.retry_delay_ms / 1000)
+
     result = deps.registry.invoke(task["required_tool"], task["arguments"])
 
     outcome = TaskOutcome(
@@ -211,8 +217,9 @@ def execute(payload: dict[str, Any], deps: Deps, source: ToolSource) -> dict[str
         retry_policy=result.retry_policy.value, attempt=attempt,
     )
     mark = "✓" if outcome["ok"] else f"✗ {outcome['error_code']}"
+    waited = f"，退避 {deps.retry_delay_ms}ms 后" if attempt > 1 else ""
     return {"outcomes": [outcome], "execution_count": 1,
-            "trace": [f"{source.value}: {task['id']} {mark}（第 {attempt} 次）"]}
+            "trace": [f"{source.value}: {task['id']} {mark}（{waited}第 {attempt} 次）"]}
 
 
 # ============================================================
