@@ -121,9 +121,9 @@ schema 校验与自修复重试。这两项对云端模型同样适用，属于�
 |---|---|---|
 | 判断不交给模型 | `graph/dag.py`、`nodes.evaluator` | 第 1 周已实现，本周补守卫测试 |
 | 模型调用范围受限 | `test_graph.py` AST 守卫 | 本周落地 |
-| 上下文预算与裁剪 | `llm/context.py` | 第 2 周任务 2 |
-| token 计量 | `llm/base.py::TokenEstimator` | 第 2 周任务 2，默认字符数近似 |
-| 归一化解析 | `tools/adapter.py` | 第 2 周任务 1 |
+| 上下文预算与裁剪 | `llm/context.py` | 已落地 |
+| token 计量 | `llm/base.py::LLM.estimate` | 已落地，默认按字符近似 |
+| 归一化解析 | `tools/validation.py` | 已落地 |
 | schema 收紧 | `graph/schema.py::task_plan_model_for` | 第 1 周已实现 |
 | 自修复重试 | `llm/base.py::complete_structured` | 第 1 周已实现 |
 | 约束解码 | 同一份 schema 转采样语法 | 待 MiMo 推理栈 |

@@ -19,7 +19,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..llm import LLMMessage, system, user
+from ..llm import system, user
+from ..llm.context import Section, fit
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
 from . import dag, dataflow
@@ -64,9 +65,12 @@ def _build_tasks(specs: list[Any], prefix: str = "") -> dict[str, Task]:
     return tasks
 
 
-def _plan(deps: Deps, messages: list[LLMMessage], prefix: str = "",
-          keep: dict[str, Task] | None = None) -> dict[str, Task]:
-    """要求模型产出任务图，并做结构校验。
+def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
+          keep: dict[str, Task] | None = None) -> tuple[dict[str, Task], list[str]]:
+    """要求模型产出任务图，并做结构校验。返回任务图与上下文削减说明。
+
+    提示词按预算拼装：端侧窗口小，工具一多、历史一长就会触顶，
+    此时削减低优先级片段，而不是直接拒绝（见 llm/context.py）。
 
     两道关卡：
       · schema 校验（AG-1001）—— 格式、字段、工具名是否合法
@@ -74,8 +78,15 @@ def _plan(deps: Deps, messages: list[LLMMessage], prefix: str = "",
     格式对但结构错的图必须在执行前拦下，否则会表现为莫名其妙的死锁。
     """
     model = task_plan_model_for([t.name for t in deps.registry])
+
+    # complete_structured 会另外注入一份 schema，预算里必须给它留出位置，
+    # 否则拼好的提示词加上 schema 仍会超窗。
+    schema_json = json.dumps(model.model_json_schema(), ensure_ascii=False)
+    reserve = deps.llm.estimate(schema_json) + deps.llm.estimate(role)
+    body, notes = fit(sections, deps.llm.context_limit - reserve, deps.llm.estimate)
+
     try:
-        parsed = deps.llm.complete_structured(messages, model)
+        parsed = deps.llm.complete_structured([system(role), user(body)], model)
     except AgentError as e:
         if e.code is ErrorCode.AG_LLM_INVALID_RESPONSE:
             # 分层：模型层说「输出不合 schema」，规划层说「没能产出可执行计划」
@@ -85,11 +96,30 @@ def _plan(deps: Deps, messages: list[LLMMessage], prefix: str = "",
 
     tasks = {**(keep or {}), **_build_tasks(parsed.tasks, prefix)}
     dag.validate(tasks)          # 结构非法 -> AG-1004
-    return tasks
+    return tasks, notes
 
 
 def _describe_tools(registry: ToolRegistry) -> str:
     return json.dumps(registry.to_model_schemas(), ensure_ascii=False, indent=2)
+
+
+def _tools_section(registry: ToolRegistry) -> Section:
+    """工具描述：预算不够时削减为只剩工具名。
+
+    完整 schema 是规划质量的主要输入，但窗口触顶时保留工具名，
+    模型仍有机会选对工具并配合自修复补齐参数；整段丢掉则连选都无从选起。
+    """
+    return Section(
+        "工具描述",
+        f"可用工具：\n{_describe_tools(registry)}",
+        priority=1,
+        compact="可用工具：" + "、".join(t.name for t in registry),
+    )
+
+
+def _trace_trim(notes: list[str]) -> str:
+    """把削减说明拼进 trace。裁掉了什么必须能看见。"""
+    return f"（上下文削减：{'，'.join(notes)}）" if notes else ""
 
 
 # ============================================================
@@ -107,10 +137,9 @@ _PLANNER_ROLE = (
 
 def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
     try:
-        tasks = _plan(deps, [
-            system(_PLANNER_ROLE),
-            user(f"可用工具：\n{_describe_tools(deps.registry)}\n\n"
-                 f"用户目标：{state['user_request']}"),
+        tasks, notes = _plan(deps, _PLANNER_ROLE, [
+            _tools_section(deps.registry),
+            Section("用户目标", f"用户目标：{state['user_request']}"),
         ])
     except AgentError as e:
         # 规划失败不能炸掉整个调用 —— 空任务图会让 Scheduler 立刻判定完成
@@ -122,7 +151,8 @@ def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
     layers = dag.parallel_layers(tasks)
     return {
         "tasks": tasks, "verdict": None,
-        "trace": [f"planner: {len(tasks)} 个任务，{len(layers)} 层依赖 → {layers}"],
+        "trace": [f"planner: {len(tasks)} 个任务，{len(layers)} 层依赖 → {layers}"
+                  + _trace_trim(notes)],
     }
 
 
@@ -312,16 +342,25 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
                             for tid, t in tasks.items()
                             if t["status"] is TaskStatus.FAILED) or "  （无）"
 
+    n_failed = len(terminal) - len(done)
     try:
-        merged = _plan(
+        merged, notes = _plan(
             deps,
-            [system(_PLANNER_ROLE.replace("任务规划器", "任务重规划器")
-                    + " 原任务图中有任务失败了，请基于已完成的结果重新规划【剩余】工作，"
-                      "避开失败的做法。新任务可以依赖已完成任务的 id。"),
-             user(f"可用工具：\n{_describe_tools(deps.registry)}\n\n"
-                  f"用户目标：{state['user_request']}\n\n"
-                  f"已完成：\n{done_text}\n\n失败：\n{failed_text}\n\n"
-                  f"请给出剩余任务。")],
+            _PLANNER_ROLE.replace("任务规划器", "任务重规划器")
+            + " 原任务图中有任务失败了，请基于已完成的结果重新规划【剩余】工作，"
+              "避开失败的做法。新任务可以依赖已完成任务的 id。",
+            [
+                _tools_section(deps.registry),
+                Section("用户目标", f"用户目标：{state['user_request']}"),
+                # 已完成的结果原文最先被削减：重规划真正需要的是「哪条路走不通」，
+                # 已完成部分只要知道有多少即可，具体结果下游任务可以再引用。
+                Section("已完成", f"已完成：\n{done_text}", priority=3,
+                        compact=f"已完成 {len(done)} 个任务（结果从略）"),
+                # 失败信息是重规划的主要依据，比已完成结果后削减。
+                Section("失败", f"失败：\n{failed_text}", priority=2,
+                        compact=f"有 {n_failed} 个任务失败（详情从略）"),
+                Section("要求", "请给出剩余任务。"),
+            ],
             prefix=f"r{generation}_",
             keep=terminal,      # 已完成/已失败的原样保留，不重做也不丢历史
         )
@@ -334,7 +373,7 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
     return {"tasks": merged, "dispatch": [], "verdict": None,
             "replan_count": generation,
             "trace": [f"replanner: 第 {generation} 次重规划，保留 {len(done)} 个已完成、"
-                      f"{len(terminal) - len(done)} 个已失败，新增 {added} 个任务"]}
+                      f"{n_failed} 个已失败，新增 {added} 个任务" + _trace_trim(notes)]}
 
 
 # ============================================================
@@ -359,10 +398,34 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
     else:
         ask = "请根据执行结果，用一两句话回答用户。"
 
-    answer = deps.llm.complete([
-        system("你是端侧智能助理。回答要简洁，只说结论，不复述过程。"),
-        user(f"用户目标：{state['user_request']}\n\n执行情况：\n{detail}\n\n{ask}"),
-    ]).content
+    role = "你是端侧智能助理。回答要简洁，只说结论，不复述过程。"
+    try:
+        body, notes = fit([
+            Section("用户目标", f"用户目标：{state['user_request']}"),
+            # 执行明细可能很长；削减后只剩成败计数，仍足以给出一句可用的回答。
+            Section("执行情况", f"执行情况：\n{detail}", priority=2,
+                    compact=f"执行情况：成功 {len(summary['completed'])} 个、"
+                            f"失败 {len(summary['failed'])} 个（明细从略）"),
+            Section("要求", ask),
+        ], deps.llm.context_limit - deps.llm.estimate(role), deps.llm.estimate)
+        answer = deps.llm.complete([system(role), user(body)]).content
+        note = _trace_trim(notes)
+    except AgentError as e:
+        if e.code is not ErrorCode.AG_CONTEXT_OVERFLOW:
+            raise
+        # 削减到不可裁片段仍放不下。回答不该因此缺席 —— 用确定性的执行概况
+        # 兜底，用户至少知道做到了哪一步。
+        answer = _summary_answer(state, summary)
+        note = f"（上下文放不下，改用确定性摘要：{e.code}）"
 
     return {"tasks": tasks, "final_answer": answer, "execution_summary": summary,
-            "trace": ["finalizer: 已生成回答"]}
+            "trace": ["finalizer: 已生成回答" + note]}
+
+
+def _summary_answer(state: AgentState, summary: dict[str, Any]) -> str:
+    """不经模型的回答。窗口放不下时的兜底，内容完全由执行结果决定。"""
+    done, failed = len(summary["completed"]), len(summary["failed"])
+    head = f"已完成 {done} 项、失败 {failed} 项。"
+    if state.get("failure"):
+        return head + f"任务未能完成，错误码 {state['failure']}。"
+    return head

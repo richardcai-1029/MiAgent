@@ -7,7 +7,8 @@ import pytest
 
 from miagent.client import MiClawClient
 from miagent.graph import build_agent, dag, initial_state
-from miagent.graph.nodes import Deps, evaluator, execute, scheduler
+from miagent.graph.nodes import (Deps, evaluator, execute, finalizer,
+                                 planner, scheduler, _tools_section)
 from miagent.graph.routers import route_after_evaluator, route_after_scheduler
 from langgraph.types import Send
 
@@ -449,3 +450,47 @@ class TestRetryBackoff:
         task["retry_count"] = 1
         out = execute({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
         assert "退避 250ms" in out["trace"][0]
+
+
+class TestContextBudget:
+    """端侧窗口小，超限时削减低优先级片段而不是直接拒绝。"""
+
+    def test_tool_descriptions_compact_to_names(self, registry):
+        """完整 schema 放不下时保留工具名：模型仍能选对工具，
+        整段丢掉则连选都无从选起。"""
+        from miagent.llm.context import Section, fit
+
+        body, notes = fit([_tools_section(registry), Section("目标", "目标：查电量")],
+                          limit=300, estimate=len)
+        assert notes == ["工具描述→紧凑形式"]
+        assert "system.get_battery" in body, "工具名应当保留"
+        assert "inputSchema" not in body, "完整 schema 应当已被削减掉"
+
+    def test_planner_reports_overflow_instead_of_crashing(self, registry):
+        """削减到不可裁片段仍放不下时，作为一次可解释的失败返回，
+        而不是让异常炸掉整张图。"""
+        llm = llm_for(plan())
+        llm.context_limit = 10
+        out = planner(initial_state("查一下电量"), Deps(llm=llm, registry=registry))
+        assert out["failure"] == ErrorCode.AG_CONTEXT_OVERFLOW.value
+        assert out["tasks"] == {}
+
+    def test_finalizer_falls_back_to_deterministic_answer(self, registry):
+        """回答不该因为窗口放不下而缺席。"""
+        def must_not_be_called(_messages):
+            raise AssertionError("窗口放不下时不应该再去调模型")
+
+        llm = FakeLLM(responder=must_not_be_called, context_limit=10)
+        state = initial_state("查一下电量")
+        t = new_task("t1", "查电量", "system.get_battery")
+        t["status"], t["result"] = TaskStatus.DONE, "电量 63%"
+        state["tasks"] = {"t1": t}
+
+        out = finalizer(state, Deps(llm=llm, registry=registry))
+        assert out["final_answer"].startswith("已完成 1 项")
+        assert "上下文放不下" in out["trace"][0]
+
+    def test_no_trimming_note_when_everything_fits(self, registry):
+        deps = Deps(llm=llm_for(plan(task("t1", "echo", text="hi"))), registry=registry)
+        out = planner(initial_state("原样返回 hi"), deps)
+        assert "上下文削减" not in out["trace"][0]

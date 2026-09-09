@@ -98,8 +98,17 @@ class LLM(ABC):
         self.total_elapsed_ms = 0.0
         self.repair_count = 0
 
+    def estimate(self, text: str) -> int:
+        """估算一段文本占多少上下文预算。
+
+        默认按字符数计。这是**近似值而非真实 token 数** —— MiMo 的 tokenizer
+        当前不可获取，字符数是唯一可用的口径。接入真实 tokenizer 后覆写此方法，
+        上层的预算与裁剪逻辑不受影响。
+        """
+        return len(text)
+
     def complete(self, messages: list[LLMMessage]) -> LLMResponse:
-        prompt_chars = sum(m.size for m in messages)
+        prompt_chars = sum(self.estimate(m.content) for m in messages)
         if prompt_chars > self.context_limit:
             # 端侧窗口小，宁可在发出前拦住，也不要让模型截断输入后
             # 返回一个看起来合理、实则基于残缺上下文的答案。
