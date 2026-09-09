@@ -31,11 +31,22 @@ def echo(text: str) -> str:
     return text
 
 
+@tool()
+def join(left: str, right: str) -> str:
+    """把两段文本拼起来。
+
+    Args:
+        left: 左边一段
+        right: 右边一段
+    """
+    return f"{left}|{right}"
+
+
 @pytest.fixture
 def registry():
     client = MiClawClient(transport=LoopbackTransport(MiClawMockServer()))
     client.connect("test", PERMS)
-    reg = ToolRegistry([echo])
+    reg = ToolRegistry([echo, join])
     reg.load_from_miclaw(client)
     yield reg
     client.close()
@@ -333,3 +344,75 @@ def test_model_is_confined_to_planning_nodes():
         f"模型调用范围发生变化，当前出现在 {sorted(touching)}。"
         "调度、执行、评估环节的判断均有确定答案，必须由纯函数承担。"
     )
+
+
+# ============================================================
+# 多工具联动：任务间的数据流
+# ============================================================
+
+REF = "$from"
+
+
+class TestToolChaining:
+    """上游工具的结果作为下游工具的参数 —— 缺了它，多个工具只是多次
+    互不相干的调用，构不成联动。"""
+
+    def test_downstream_receives_upstream_result(self, registry):
+        """t1 查电量 → t2 拿到 t1 的结果原文。"""
+        out = run(registry, "看看电量并复述", llm_for(plan(
+            task("t1", "system.get_battery"),
+            task("t2", "echo", text={REF: "t1"}),
+        )))
+        assert out["failure"] is None
+        assert out["tasks"]["t1"]["result"] == "电量 63%，未在充电"
+        assert out["tasks"]["t2"]["result"] == "电量 63%，未在充电"
+
+    def test_reference_alone_serializes_execution(self, registry):
+        """只写引用、不写 dependencies，两个任务也必须分两层执行。
+
+        引用即依赖 —— 否则 t2 会与 t1 同轮派发，取到还不存在的结果。
+        """
+        out = run(registry, "看看电量并复述", llm_for(plan(
+            task("t1", "system.get_battery"),
+            task("t2", "echo", text={REF: "t1"}),
+        )))
+        assert out["tasks"]["t2"]["dependencies"] == ["t1"]
+        layers = dag.parallel_layers(out["tasks"])
+        assert layers == [["t1"], ["t2"]]
+
+    def test_original_arguments_keep_the_reference(self, registry):
+        """求值只作用于派发出去的副本，任务图里存的仍是引用本身，
+        重试时会重新求值。"""
+        out = run(registry, "看看电量并复述", llm_for(plan(
+            task("t1", "system.get_battery"),
+            task("t2", "echo", text={REF: "t1"}),
+        )))
+        assert out["tasks"]["t2"]["arguments"] == {"text": {REF: "t1"}}
+
+    def test_reference_to_missing_task_is_rejected_before_execution(self, registry):
+        """引用不存在的任务 = 依赖缺失，在执行任何一步之前拦下。"""
+        out = run(registry, "复述", llm_for(plan(
+            task("t2", "echo", text={REF: "nope"}),
+        )))
+        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["execution_count"] == 0
+
+    def test_reference_cycle_is_rejected_before_execution(self, registry):
+        out = run(registry, "复述", llm_for(plan(
+            task("t1", "echo", text={REF: "t2"}),
+            task("t2", "echo", text={REF: "t1"}),
+        )))
+        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["execution_count"] == 0
+
+    def test_parallel_branches_feed_one_downstream_task(self, registry):
+        """扇入：两个并行任务的结果同时喂给下游一个任务。"""
+        out = run(registry, "汇总", llm_for(plan(
+            task("t1", "echo", text="A"),
+            task("t2", "echo", text="B"),
+            task("t3", "join", left={REF: "t1"}, right={REF: "t2"}),
+        )))
+        assert out["failure"] is None
+        assert out["tasks"]["t3"]["status"] is TaskStatus.DONE
+        assert out["tasks"]["t3"]["result"] == "A|B"
+        assert dag.parallel_layers(out["tasks"]) == [["t1", "t2"], ["t3"]]

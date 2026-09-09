@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from ..protocol import AgentError, ErrorCode, MiAgentError, RetryPolicy, retry_policy
+from ..protocol import ErrorCode, MiAgentError, RetryPolicy, retry_policy
+from .validation import normalize
 
 
 class ToolSource(StrEnum):
@@ -93,8 +94,7 @@ class Tool(ABC):
         """调用工具。任何情况下都返回 ToolResult，不向上抛异常。"""
         args = arguments or {}
         try:
-            self._validate(args)
-            return ToolResult(content=self._run(args))
+            return ToolResult(content=self._run(self._validate(args)))
         except MiAgentError as e:
             # 我们自己体系内的错误，错误码原样保留
             return ToolResult(content=e.message, is_error=True,
@@ -108,15 +108,18 @@ class Tool(ABC):
                 detail={"exception": type(e).__name__},
             )
 
-    def _validate(self, args: dict[str, Any]) -> None:
-        """必填参数检查。这一步在本地做，能省掉一次无谓的 IPC。"""
-        missing = [f for f in self.input_schema.get("required", []) if f not in args]
-        if missing:
-            raise AgentError(
-                ErrorCode.AG_TOOL_SCHEMA_INVALID,
-                f"缺少必填参数: {', '.join(missing)}",
-                detail={"missing": missing, "tool": self.name},
-            )
+    def _validate(self, args: dict[str, Any]) -> dict[str, Any]:
+        """按 schema 校验并归一化参数，返回可直接传给 _run 的新字典。
+
+        不合法的调用在本地就被挡下，省掉一次无谓的 IPC；无歧义的格式漂移
+        （数字写成字符串、单值漏了数组包装）在这里被吸收，不必多烧一轮
+        端侧推理去让模型重写。边界见 validation 模块。
+        """
+        try:
+            return normalize(args, self.input_schema)
+        except MiAgentError as e:
+            e.detail["tool"] = self.name
+            raise
 
     @abstractmethod
     def _run(self, args: dict[str, Any]) -> str:

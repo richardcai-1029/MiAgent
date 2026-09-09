@@ -28,7 +28,8 @@ class TaskSpec(BaseModel):
         default_factory=list,
         description="必须先完成的任务 id 列表；没有依赖则为空数组")
     required_tool: str = Field(description="要调用的工具名")
-    arguments: dict[str, Any] = Field(default_factory=dict, description="工具参数")
+    arguments: dict[str, Any] = Field(default_factory=dict,
+                                      description='工具参数。要用到上游任务的结果时，把该参数的值写成 {"$from": "上游任务 id"}，该引用会自动产生依赖关系')
 
 
 class TaskPlan(BaseModel):
@@ -58,7 +59,8 @@ def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
         dependencies=(list[str], Field(default_factory=list,
                                        description="必须先完成的任务 id 列表")),
         required_tool=(tool_field, Field(description="工具名，必须是列出的之一")),
-        arguments=(dict[str, Any], Field(default_factory=dict, description="工具参数")),
+        arguments=(dict[str, Any], Field(default_factory=dict,
+                                         description='工具参数。要用到上游任务的结果时，把该参数的值写成 {"$from": "上游任务 id"}，该引用会自动产生依赖关系')),
     )
     return create_model(
         "TaskPlanConstrained",

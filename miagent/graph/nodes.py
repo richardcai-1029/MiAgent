@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from ..llm import LLMMessage, system, user
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
-from . import dag
+from . import dag, dataflow
 from .nodes_meta import Deps
 from .schema import task_plan_model_for
 from .state import (
@@ -47,14 +47,20 @@ def _build_tasks(specs: list[Any], prefix: str = "") -> dict[str, Task]:
     """把模型产出的 TaskSpec 列表转成运行时任务图。
 
     prefix 用于重规划：新任务的 id 加前缀，避免与已完成任务撞名。
-    依赖里指向新任务的 id 同步加前缀，指向已完成任务的保持原样。
+    依赖与参数引用里指向新任务的 id 同步加前缀，指向已完成任务的保持原样。
+
+    参数里的引用会派生出依赖边（见 dataflow 模块）：模型只要写了引用，
+    先后关系就已经确定，不必再指望它在 dependencies 里重复声明一遍。
     """
     new_ids = {s.id: prefix + s.id for s in specs}
     tasks: dict[str, Task] = {}
     for s in specs:
+        arguments = dataflow.remap_references(s.arguments, new_ids)
         deps = [new_ids.get(d, d) for d in s.dependencies]
+        derived = dataflow.referenced_ids(arguments) - set(deps)
         tasks[new_ids[s.id]] = new_task(
-            new_ids[s.id], s.description, s.required_tool, s.arguments, deps)
+            new_ids[s.id], s.description, s.required_tool, arguments,
+            deps + sorted(derived))
     return tasks
 
 
@@ -94,6 +100,8 @@ _PLANNER_ROLE = (
     "你是端侧智能助理的任务规划器。把用户目标拆解为最少的可执行任务，"
     "并用 dependencies 显式表达任务之间的先后关系。"
     "没有先后关系的任务不要写依赖 —— 它们会被并行执行。"
+    "某个参数要用到前一个任务的结果时，把该参数的值写成 "
+    '{"$from": "那个任务的 id"}，先后关系会由此自动确定。'
 )
 
 
@@ -159,7 +167,11 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
                 continue
             miclaw_used += 1
         tasks[tid]["status"] = TaskStatus.RUNNING
-        dispatch.append(DispatchItem(task=tasks[tid], route=route))
+        # 参数里的引用在这里落实成上游任务的结果。放在派发前做，
+        # 执行节点因此拿到的是一份参数已经确定的任务，不需要知道数据流的存在。
+        ready_task = dict(tasks[tid])
+        ready_task["arguments"] = dataflow.resolve(tasks[tid]["arguments"], tasks)
+        dispatch.append(DispatchItem(task=ready_task, route=route))
 
     note = f"，{deferred} 个因并发配额顺延" if deferred else ""
     names = ", ".join(f"{d['task']['id']}({d['route']})" for d in dispatch)
