@@ -44,6 +44,7 @@ LangChain 工具失败表现为 Python 异常或自由文本，无错误分类�
 | B-3 | 错误码在网络两侧无法还原为同一异常 | 客户端按 `data.code` 还原为 `MiClawError`；未知码兜底不崩溃 | `client.py::_to_exception` | L0 |
 | B-4 | 无按错误类别的差异化重试策略 | 按千位段位决策：1xxx 退避重试、4xxx 延迟或降级、3xxx/5xxx 不重试 | `protocol/errors.py::retry_policy`；`test_tools.py::TestRetryPolicyByBand` | L0 |
 | B-6 | 业务失败（`isError`）与调用失败（JSON-RPC error）未在上层区分 | 上层据此选择「让模型换方案」还是「退避重试」 | `client.py::call_tool` 将 isError 映射为 MC-3003；见 `test_business_failure_differs_from_call_failure` | L0 |
+| B-8 | 工具内部异常的原始文本直接作为给模型的失败信息 —— 异常消息常带路径、连接串、内部标识，既占端侧本就紧张的窗口，又可能把模型带偏 | 给模型的 content 改为确定性措辞加分级处置建议；原始消息与异常类型移入 `detail`，只进 Agent 侧日志 | `tools/base.py::Tool.invoke`；`test_validation.py::TestErrorTextGivenToTheModel` | L0 |
 | B-7 | `RetryPolicy.BACKOFF` 声明「退避后重试」，实现却是下一轮立即重发 —— 传输抖动与资源占用这两类失败在立即重发时状况还没来得及改变 | 重试前等待；等待实现可注入，使退避行为可被测试观察而不必真的等 | `nodes.execute`；`test_graph.py::TestRetryBackoff` | L0 |
 
 ### C · 端侧资源约束
@@ -65,6 +66,7 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 |---|---|---|---|---|
 | D-1 | LLM 抽象面向云端 API | 定义最小 LLM 接口，支持 Fake / MiMo 端侧 / 云端三种实现热切换 | `miagent/llm/`；模板方法统一承担上下文检查与耗时统计，Fake/云端两种实现已可切换 | L0 |
 | D-2 | 上下文超限直接拒绝（AG-3001）。端侧窗口小，工具一多、执行历史一长，正常任务也会触顶，拒绝即等于任务失败 | 提示词按优先级片段拼装，超预算时依次削减：工具描述削为只剩工具名、执行历史削为只剩计数；不做按字符截断（切开的 JSON 与历史是语法损坏的文本）；削减内容进 trace；计量口径由 `LLM.estimate` 提供，默认按字符近似，接入真实 tokenizer 后覆写 | `llm/context.py`；`test_context.py` 13 条用例 | L0 |
+| D-3 | 解析入口以「第一个 `{` 到最后一个 `}`」截取 JSON：输出含两个 JSON 块时会把两块连同中间的文字一并截出，得到的既不是前者也不是后者 | 改为逐字符扫描取第一个括号配对完整的对象，同时去掉结构上的尾随逗号；扫描区分字符串内外，不会动到字符串值里的逗号。引号错用与截断不修补 —— 修复方式不唯一，猜出来的计划会被真实执行，交由自修复重试 | `llm/base.py::first_json_object`；`test_llm.py::TestDirtyOutputCleaning` | L0 |
 | D-4 | 工具描述格式与模型 function calling 格式未打通 | MCP `inputSchema` 本就是 JSON Schema，可直接喂模型，无需转换 | `test_client.py::test_tool_schema_survives_the_wire` | L0 |
 | D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `graph/schema.py`、`llm/base.py::complete_structured` | L0 |
 
@@ -90,10 +92,12 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 
 | 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
 |---|---|---|---|---|
-| G-2 | 无步数与预算上限，模型可能陷入死循环 | 落地 AG-1002（超步数）、AG-1003（无进展）、AG-4002（超预算） | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003 | L1 |
+| G-2 | 无步数与预算上限，模型可能陷入死循环 | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003。累计执行上限由 Scheduler 在派发前检查，因而顺利执行的流程同样受其约束 | `nodes.scheduler`；`test_graph.py::TestExecutionBudgetBoundsSuccessToo` | L1 |
+| G-3 | 模型可能把目标拆得过细，每一步都是一次真实调用，白白消耗端侧算力 | 规划产出的待执行任务数超过累计执行预算即拒绝——这样的计划在预算内必然跑不完，与其执行到一半才发现不如当场拒绝。上限直接取执行预算，不另立数字 | `nodes._plan`；`test_graph.py::TestPlanSizeIsChecked` | L0 |
 | G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、五态生命周期、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `graph/dag.py`；`test_dag.py` 25 条用例覆盖边界 | L0 |
 | G-5 | 无依赖关系的任务仍被串行执行，浪费 IPC 等待时间 | 以 LangGraph Send 并行派发同层任务；需为 tasks 定义按 id 合并的 reducer，避免多分支写回互相覆盖 | `routers.py` 返回 Send 列表扇出；outcomes 与 execution_count 用 reducer 汇总；实测无依赖任务提速 3.00x | **L2 · 高** |
 | G-6 | 任务图非法（依赖缺失/自依赖/成环）会表现为莫名死锁 | Kahn 拓扑排序在执行前校验，映射 AG-1004；运行期死锁映射 AG-1005 | `dag.validate()`；`test_cyclic_plan_rejected_before_execution` | L0 |
+| G-8 | 「所有任务都到了终态」被当作「目标达成」：重规划跑完一个新任务都没产出时，失败任务不会再有人接手，流程却照常收尾，用户拿到声称完成实则漏做的回答 | 重规划产出为空且仍有失败任务时判定未达成，错误码取根因（跳过级联失败的 AG-1005）。保留的失败任务本身不作为判据——重规划成功接手时，前一条路失败是正常剧情 | `nodes.replanner`、`_root_failure`；`test_graph.py::TestCompletionIsVerified` | L0 |
 | G-7 | 任务参数由模型一次性写死，下游任务取不到上游结果，多个工具只是多次互不相干的调用 | 参数中以 `{"$from": "任务 id"}` 引用上游结果，派发前确定性求值；引用即依赖，先后关系由引用派生，不依赖模型再声明一遍 | `graph/dataflow.py`；`test_dataflow.py` 23 条用例 | L0 |
 
 
@@ -131,12 +135,13 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 30 | A 组全部、B 组全部、C-2、C-3、C-7、D 组全部、E 组全部、F 组全部、G-4、G-6、G-7、H-1、H-3 |
+| L0 | 34 | A 组全部、B 组全部、C-2、C-3、C-7、D 组全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、H-1、H-3 |
 | L1 | 3 | C-6、G-2、H-2 |
 | L2 | 1 | **G-5** |
 | L3 | 0 | — |
 
-合计 34 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，B-7、C-7、D-2、F-7、G-7 为第 2 周新增。
+合计 38 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
+B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，
@@ -242,7 +247,7 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 
 ## 四、验证方式
 
-规约与改造的全部约定均以测试代码固化，当前累计 263 条用例。
+规约与改造的全部约定均以测试代码固化，当前累计 291 条用例。
 
 | 验证项 | 方式 |
 |---|---|

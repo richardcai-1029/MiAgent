@@ -101,11 +101,17 @@ class Tool(ABC):
                               error_code=e.code, detail=e.detail)
         except Exception as e:
             # 工具实现里的意外异常。不能让它炸掉整张图。
+            #
+            # ★ 原始异常文本不进 content。content 会被 for_model() 原样送进
+            #   提示词，而异常消息里常带路径、连接串、内部标识这类对模型毫无
+            #   用处的东西 —— 它既占端侧本就紧张的窗口，又可能把模型带偏。
+            #   排查需要的原文放进 detail，detail 只进 Agent 侧日志。
             return ToolResult(
-                content=f"工具内部错误: {e}",
+                content="工具执行时发生内部错误",
                 is_error=True,
                 error_code=ErrorCode.AG_TOOL_EXECUTION_FAILED,
-                detail={"exception": type(e).__name__},
+                detail={"exception": type(e).__name__, "message": str(e),
+                        "tool": self.name},
             )
 
     def _validate(self, args: dict[str, Any]) -> dict[str, Any]:

@@ -12,7 +12,8 @@ from miagent.graph.nodes import (Deps, evaluator, execute, finalizer,
 from miagent.graph.routers import route_after_evaluator, route_after_scheduler
 from langgraph.types import Send
 
-from miagent.graph.state import MAX_REPLANS, TaskOutcome, TaskStatus, new_task
+from miagent.graph.state import (MAX_REPLANS, MAX_TOTAL_EXECUTIONS,
+                                 TaskOutcome, TaskStatus, new_task)
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
 from miagent.protocol import ErrorCode
@@ -494,3 +495,106 @@ class TestContextBudget:
         deps = Deps(llm=llm_for(plan(task("t1", "echo", text="hi"))), registry=registry)
         out = planner(initial_state("原样返回 hi"), deps)
         assert "上下文削减" not in out["trace"][0]
+
+
+class TestPlanSizeIsChecked:
+    """拆得过细会白白消耗端侧算力，每一步都是一次真实调用。
+    上限直接取累计执行预算，不另立数字：待执行任务数超过预算的计划
+    在预算内必然跑不完。"""
+
+    def _oversized(self):
+        return plan(*[task(f"t{i}", "echo", text=str(i))
+                      for i in range(MAX_TOTAL_EXECUTIONS + 1)])
+
+    def test_oversized_plan_is_rejected_before_any_execution(self, registry):
+        out = run(registry, "做很多事", llm_for(self._oversized()))
+        assert out["failure"] == ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
+        assert out["execution_count"] == 0, "被拒的计划不应该已经执行掉几步"
+        assert out["tasks"] == {}
+
+    def test_plan_at_the_budget_is_accepted(self, registry):
+        """恰好等于预算的计划仍然可执行 —— 判据是「超过」而非「接近」。"""
+        out = run(registry, "做很多事", llm_for(
+            plan(*[task(f"t{i}", "echo", text=str(i))
+                   for i in range(MAX_TOTAL_EXECUTIONS)])))
+        assert out["failure"] is None
+        assert len(out["tasks"]) == MAX_TOTAL_EXECUTIONS
+
+    def test_rejected_plan_still_answers_the_user(self, registry):
+        out = run(registry, "做很多事", llm_for(self._oversized()))
+        assert out["final_answer"]
+
+
+class TestExecutionBudgetBoundsSuccessToo:
+    """累计执行预算此前只在失败分支里检查，因而完全约束不住顺利执行的流程。
+    预算要能兜住的恰恰是「模型拆出多少就执行多少」这种情况。"""
+
+    def _deps(self, registry):
+        return Deps(llm=FakeLLM(script=[]), registry=registry)
+
+    def test_scheduler_stops_dispatching_at_the_budget(self, registry):
+        state = initial_state("x")
+        state["tasks"] = {"t1": new_task("t1", "任务 t1", "echo", {"text": "a"})}
+        state["execution_count"] = MAX_TOTAL_EXECUTIONS
+
+        out = scheduler(state, self._deps(registry))
+        assert out["dispatch"] == []
+        assert out["failure"] == ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
+
+    def test_below_the_budget_still_dispatches(self, registry):
+        state = initial_state("x")
+        state["tasks"] = {"t1": new_task("t1", "任务 t1", "echo", {"text": "a"})}
+        state["execution_count"] = MAX_TOTAL_EXECUTIONS - 1
+
+        out = scheduler(state, self._deps(registry))
+        assert len(out["dispatch"]) == 1
+
+
+class TestCompletionIsVerified:
+    """「所有任务都到了终态」不等于「目标达成」。"""
+
+    def test_replan_that_produces_nothing_is_reported_as_unmet(self, registry):
+        """重规划是恢复机制，它跑完却一个新任务都没产出，说明恢复没发生，
+        失败任务不会再有人接手 —— 照常收尾会给出声称完成实则漏做的回答。"""
+        out = run(registry, "汇总", llm_for(
+            plan(task("t1", "echo", text="A"),
+                 task("t2", "join", left="只给了一个参数")),
+            replan=plan()))
+        assert out["tasks"]["t2"]["status"] is TaskStatus.FAILED
+        assert out["failure"] == ErrorCode.AG_TOOL_SCHEMA_INVALID.value
+
+    def test_successful_replan_is_not_reported_as_failure(self, registry):
+        """保留的失败任务是执行历史。重规划成功接手时，前一条路失败是正常剧情，
+        不能据此判定目标未达成。"""
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.query_calendar", when="今晚"),
+                 task("t2", "system.book_restaurant", ["t1"], name="小馆 A")),
+            replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
+        assert out["failure"] is None
+
+    def _failed(self, tid, code):
+        t = new_task(tid, f"任务 {tid}", "echo")
+        t["status"], t["error"] = TaskStatus.FAILED, code
+        return t
+
+    def test_root_cause_is_preferred_over_cascaded_code(self):
+        """级联失败的错误码统一是 AG-1005（前置任务失败），只说明被牵连，
+        对用户没有信息量 —— 收尾时要给出根因。"""
+        from miagent.graph.nodes import _root_failure
+
+        tasks = {
+            "t1": self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value),
+            "t2": self._failed("t2", ErrorCode.MC_PERMISSION_DENIED.value),
+        }
+        assert _root_failure(tasks, ["t1", "t2"]) == ErrorCode.MC_PERMISSION_DENIED.value
+
+    def test_all_cascaded_falls_back_to_the_first(self):
+        from miagent.graph.nodes import _root_failure
+
+        tasks = {"t1": self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value)}
+        assert _root_failure(tasks, ["t1"]) == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
+
+    def test_no_failures_means_no_failure_code(self):
+        from miagent.graph.nodes import _root_failure
+
+        assert _root_failure({}, []) is None

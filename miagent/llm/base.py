@@ -62,20 +62,81 @@ def assistant(content: str) -> LLMMessage:
     return LLMMessage("assistant", content)
 
 
+def first_json_object(text: str) -> str | None:
+    """截出第一个括号配对完整的 JSON 对象，顺带去掉串外的尾随逗号。
+
+    逐字符扫描而不是取「第一个 `{` 到最后一个 `}`」：模型输出里出现两个
+    JSON 块时，后者会把两块连同中间的文字一起截进来，得到的东西既不是
+    前一个对象也不是后一个。
+
+    扫描过程区分字符串内外，因此去掉的一定是结构上的尾随逗号，
+    不会动到字符串值里的逗号。
+
+    括号未配平（输出被截断）时返回 None —— **不修补截断的 JSON**。
+    补出来的括号位置只是猜测，得到的对象结构可能与模型的本意不同，
+    而这个对象会被真实执行。让它失败并触发自修复是更安全的选择。
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    trailing: list[int] = []      # 结构上的尾随逗号，其绝对下标
+    last_comma = -1               # 最近一个串外逗号；遇到别的实义字符即作废
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string, last_comma = True, -1
+        elif ch == ",":
+            last_comma = i
+        elif ch in "{[":
+            depth, last_comma = depth + 1, -1
+        elif ch in "}]":
+            if last_comma != -1:      # 逗号与闭合符之间只有空白 -> 尾随逗号
+                trailing.append(last_comma)
+            depth, last_comma = depth - 1, -1
+            if depth == 0:
+                dropped = set(trailing)
+                return "".join(c for j, c in enumerate(text[start:i + 1], start)
+                               if j not in dropped)
+        elif not ch.isspace():
+            last_comma = -1
+
+    return None
+
+
 def extract_json(text: str) -> str:
     """从模型输出里截出 JSON 部分。
 
-    模型常把 JSON 包在 ```json 代码块里，或前后带一句客套话。
-    这是最基础的一层容错，属于「尽力而为」，不构成任何保证。
+    端侧模型不保证每次都输出规整的 JSON。这一层吸收几种稳定出现且
+    **无歧义**的脏输出：markdown 围栏、前后的客套话、结构上的尾随逗号、
+    正文里出现多个 JSON 块。
+
+    引号错用（单引号、全角引号）与截断不在此列 —— 那些的修复方式不唯一，
+    交由 complete_structured 的自修复重试处理。
+
+    截不出东西时原样返回：解析失败后的错误信息要连同原始输出一起喂回给
+    模型，截过的文本会让它看不出自己错在哪。
     """
     text = text.strip()
     if "```" in text:
         for part in text.split("```"):
             part = part.removeprefix("json").strip()
             if part.startswith("{"):
-                return part
-    start, end = text.find("{"), text.rfind("}")
-    return text[start : end + 1] if start != -1 and end != -1 else text
+                return first_json_object(part) or part
+    return first_json_object(text) or text
 
 
 class LLM(ABC):

@@ -122,3 +122,61 @@ class TestStructuredOutput:
         from miagent.llm.openai_compatible import OpenAICompatibleLLM
         assert FakeLLM(script=[]).supports_native_structured_output is False
         assert OpenAICompatibleLLM.supports_native_structured_output is True
+
+
+class TestDirtyOutputCleaning:
+    """端侧模型不保证每次都输出规整 JSON。解析入口吸收无歧义的脏输出，
+    其余交给自修复重试 —— 不能拿到什么就直接当计划执行。"""
+
+    def _extract(self, raw):
+        from miagent.llm.base import extract_json
+        return extract_json(raw)
+
+    @pytest.mark.parametrize("raw", [
+        '{"a": 1}',
+        '```json\n{"a": 1}\n```',
+        '```\n{"a": 1}\n```',
+        '好的，这是计划：\n{"a": 1}\n希望有帮助！',
+        '思考：需要一步\n```json\n{"a": 1}\n```\n完成',
+    ])
+    def test_wrappers_are_stripped(self, raw):
+        import json
+        assert json.loads(self._extract(raw)) == {"a": 1}
+
+    def test_only_the_first_object_is_taken(self):
+        """输出里有两个 JSON 块时，取「第一个 { 到最后一个 }」会把两块连同
+        中间的文字一起截出来，既不是前者也不是后者。"""
+        import json
+        assert json.loads(self._extract('先看 {"a": 1} 再看 {"a": 2}')) == {"a": 1}
+
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"xs": [1, 2,]}', {"xs": [1, 2]}),
+        ('{"a": 1,}', {"a": 1}),
+        ('{"o": {"k": 1,},}', {"o": {"k": 1}}),
+    ])
+    def test_structural_trailing_commas_are_removed(self, raw, expected):
+        import json
+        assert json.loads(self._extract(raw)) == expected
+
+    def test_commas_inside_strings_are_untouched(self):
+        """扫描区分字符串内外，去掉的一定是结构上的逗号。"""
+        import json
+        raw = '{"s": "a, b", "t": "c,"}'
+        assert json.loads(self._extract(raw)) == {"s": "a, b", "t": "c,"}
+
+    @pytest.mark.parametrize("raw", [
+        '{"a": [{"id": "t1"',        # 截断
+        "{'a': 1}",                  # 单引号
+        '{“a”: 1}',                  # 全角引号
+        '不需要调用工具，电量是 63%。',   # 纯文本回答
+    ])
+    def test_ambiguous_forms_are_left_to_self_repair(self, raw):
+        """这些的修复方式不唯一。补出来的括号位置只是猜测，而猜出来的计划
+        会被真实执行 —— 让它解析失败并触发自修复更安全。"""
+        import json
+        with pytest.raises(ValueError):
+            json.loads(self._extract(raw))
+
+    def test_unparseable_text_is_returned_as_is(self):
+        """原文要连同错误一起喂回给模型，截过的文本会让它看不出错在哪。"""
+        assert self._extract("完全不是 JSON") == "完全不是 JSON"

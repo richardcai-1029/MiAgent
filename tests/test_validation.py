@@ -133,3 +133,39 @@ class TestThroughToolInvoke:
     def test_error_detail_names_the_tool(self, registry):
         res = registry.invoke("add_days", {"date": "d"})
         assert res.detail["tool"] == "add_days"
+
+
+class TestErrorTextGivenToTheModel:
+    """给模型的失败信息是提示词而不是日志：只留处置建议，
+    原始异常文本留在 detail 里供 Agent 侧排查。"""
+
+    @pytest.fixture
+    def registry(self):
+        @tool()
+        def blows_up(x: str) -> str:
+            """会抛异常的工具。
+
+            Args:
+                x: 任意输入
+            """
+            raise RuntimeError("connection pool exhausted at /opt/svc/db.py, token=abc123")
+
+        return ToolRegistry([blows_up])
+
+    def test_raw_exception_text_does_not_reach_the_model(self, registry):
+        """异常消息里常带路径、连接串、内部标识 —— 既占端侧本就紧张的窗口，
+        又可能把模型带偏。"""
+        text = registry.invoke("blows_up", {"x": "1"}).for_model()
+        for leaked in ("/opt/svc/db.py", "token=abc123", "connection pool"):
+            assert leaked not in text
+
+    def test_actionable_advice_is_kept(self, registry):
+        text = registry.invoke("blows_up", {"x": "1"}).for_model()
+        assert "AG-2004" in text
+        assert "换一种方式" in text
+
+    def test_raw_message_is_preserved_for_diagnosis(self, registry):
+        detail = registry.invoke("blows_up", {"x": "1"}).detail
+        assert detail["exception"] == "RuntimeError"
+        assert "token=abc123" in detail["message"]
+        assert detail["tool"] == "blows_up"

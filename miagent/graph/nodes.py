@@ -96,6 +96,16 @@ def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
 
     tasks = {**(keep or {}), **_build_tasks(parsed.tasks, prefix)}
     dag.validate(tasks)          # 结构非法 -> AG-1004
+
+    # 规模合理性：拆得过细会白白消耗端侧算力，每一步都是一次真实调用。
+    # 上限直接取累计执行预算，不另立一个数字 —— 待执行任务数超过预算的计划
+    # 在预算内必然跑不完，与其执行到一半才发现，不如现在就拒绝。
+    planned = len(tasks) - len(keep or {})
+    if planned > MAX_TOTAL_EXECUTIONS:
+        raise AgentError(
+            ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED,
+            f"计划拆出 {planned} 个任务，超过累计执行预算 {MAX_TOTAL_EXECUTIONS}",
+            detail={"planned": planned, "budget": MAX_TOTAL_EXECUTIONS})
     return tasks, notes
 
 
@@ -170,9 +180,21 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
 
     if dag.is_complete(tasks):
         n_ok, n_bad = len(dag.completed_tasks(tasks)), len(dag.failed_tasks(tasks))
+        # 这里不追加失败判定：保留下来的失败任务是执行历史，未必代表目标没达成
+        # —— 重规划成功接手时，前一条路失败恰恰是正常剧情。
+        # 「恢复机制交了白卷」由 Replanner 自己判定，见该节点。
         return {"tasks": tasks, "dispatch": [], "verdict": None,
                 "execution_summary": dag.summary(tasks),
                 "trace": [f"scheduler: 全部完成（成功 {n_ok} / 失败 {n_bad}）→ finalizer"]}
+
+    # 累计执行预算。此前只在失败分支里检查，因而完全约束不住顺利执行的流程 ——
+    # 模型拆出多少任务就执行多少次。预算要能兜住的恰恰是这种情况。
+    if state["execution_count"] >= MAX_TOTAL_EXECUTIONS:
+        return {"tasks": tasks, "dispatch": [], "verdict": None,
+                "failure": ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value,
+                "execution_summary": dag.summary(tasks),
+                "trace": [f"scheduler: 已执行 {state['execution_count']} 次，"
+                          f"达到累计预算 {MAX_TOTAL_EXECUTIONS} → finalizer"]}
 
     if dag.is_deadlocked(tasks):
         return {"tasks": tasks, "dispatch": [], "verdict": None,
@@ -210,6 +232,19 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
         "trace": [f"scheduler: 本轮就绪 {len(ready_ids)} 个，派发 {len(dispatch)} 个"
                   f"{note} → {names}"],
     }
+
+
+def _root_failure(tasks: dict[str, Task], failed: list[str]) -> str | None:
+    """从失败任务里挑出根因的错误码。
+
+    级联失败的任务错误码统一是 AG-1005（前置任务失败），它只说明"被牵连"，
+    对用户没有信息量。优先取自身失败的那一个。
+    """
+    if not failed:
+        return None
+    own = [tid for tid in failed
+           if tasks[tid]["error"] != ErrorCode.AG_DEPENDENCY_UNRESOLVED.value]
+    return tasks[(own or failed)[0]]["error"]
 
 
 # ============================================================
@@ -370,10 +405,16 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
                 "trace": [f"replanner: 重规划失败 {e.code}"]}
 
     added = len(merged) - len(terminal)
+
+    # 重规划是失败之后的恢复机制。它跑完却一个新任务都没产出，说明恢复没有
+    # 发生，而此时任务图里的失败任务不会再有人接手 —— 若照常收尾，用户会拿到
+    # 一个声称完成、实则漏做了事情的回答。据实标记为未达成，错误码取根因。
+    failure = _root_failure(merged, dag.failed_tasks(merged)) if added == 0 else None
+    note = f"，未产出新任务，判定未达成（{failure}）" if failure else ""
     return {"tasks": merged, "dispatch": [], "verdict": None,
-            "replan_count": generation,
+            "failure": failure, "replan_count": generation,
             "trace": [f"replanner: 第 {generation} 次重规划，保留 {len(done)} 个已完成、"
-                      f"{n_failed} 个已失败，新增 {added} 个任务" + _trace_trim(notes)]}
+                      f"{n_failed} 个已失败，新增 {added} 个任务{note}" + _trace_trim(notes)]}
 
 
 # ============================================================
