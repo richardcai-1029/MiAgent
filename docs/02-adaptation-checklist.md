@@ -69,7 +69,8 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 | D-3 | 解析入口以「第一个 `{` 到最后一个 `}`」截取 JSON：输出含两个 JSON 块时会把两块连同中间的文字一并截出，得到的既不是前者也不是后者 | 改为逐字符扫描取第一个括号配对完整的对象，同时去掉结构上的尾随逗号；扫描区分字符串内外，不会动到字符串值里的逗号。引号错用与截断不修补 —— 修复方式不唯一，猜出来的计划会被真实执行，交由自修复重试 | `llm/base.py::first_json_object`；`test_llm.py::TestDirtyOutputCleaning` | L0 |
 | D-4 | 工具描述格式与模型 function calling 格式未打通 | MCP `inputSchema` 本就是 JSON Schema，可直接喂模型，无需转换 | `test_client.py::test_tool_schema_survives_the_wire` | L0 |
 | D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `graph/schema.py`、`llm/base.py::complete_structured` | L0 |
-| D-7 | 执行上下文只增不减：终态任务全部留在任务图里，每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口 | 任务图只装还要调度的任务。终态任务在重规划时结算为 Episode 进入情景记忆，只有新任务引用到的已完成任务（连同其上游）留在图里；情景记忆渲染时按 (工具, 参数指纹) 去重、按轮次降级——本轮带结果原文，更早的只剩 id 与描述；执行概况由两者合并得出 | `miagent/memory/episodic.py`、`dag.ancestors`、`nodes.replanner`；`test_memory.py` 19 条、`test_graph.py::TestWorkingMemoryIsPruned` | L0 |
+| D-8 | 重规划无目标锚：几轮之后提示词里全是局部的成败记录，新计划可偏离原始目标且不可检测；把失败过的调用原样再拆一遍也照常执行 | 首次规划成功后写入目标锚（用户目标 + 首次拆解各步描述），每轮重规划放最前且不可裁；新任务的 (工具, 参数指纹) 全部在失败记录里时判无进展 AG-1003，不派发 | `miagent/memory/anchor.py`、`episodic.repeats_failures`、`nodes.planner` / `replanner`；`test_graph.py::TestGoalAnchor` / `TestSpinningIsDetected` | L0 |
+| D-7 | 执行上下文只增不减：终态任务全部留在任务图里，每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口 | 任务图只装还要调度的任务。终态任务在重规划时结算为 Episode 进入情景记忆，只有新任务引用到的已完成任务（连同其上游）留在图里；情景记忆渲染时按 (工具, 参数指纹) 去重、按轮次降级——本轮带结果原文，更早的只剩 id 与描述；执行概况由两者合并得出 | `miagent/memory/episodic.py`、`dag.ancestors`、`nodes.replanner`；`test_memory.py` 27 条、`test_graph.py::TestWorkingMemoryIsPruned` | L0 |
 
 ### E · 依赖裁剪与轻量化
 
@@ -137,13 +138,13 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 36 | A 组全部、B 组全部、C-2、C-3、C-7、D 组全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、H-1、H-3 |
+| L0 | 37 | A 组全部、B 组全部、C-2、C-3、C-7、D 组全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、H-1、H-3 |
 | L1 | 3 | C-6、G-2、H-2 |
 | L2 | 1 | **G-5** |
 | L3 | 0 | — |
 
-合计 40 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
-B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增，D-7、G-9 为第 3 周新增。
+合计 41 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
+B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增，D-7、D-8、G-9 为第 3 周新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，
@@ -249,7 +250,7 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 
 ## 四、验证方式
 
-规约与改造的全部约定均以测试代码固化，当前累计 320 条用例。
+规约与改造的全部约定均以测试代码固化，当前累计 335 条用例。
 
 | 验证项 | 方式 |
 |---|---|

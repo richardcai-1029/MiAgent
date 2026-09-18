@@ -8,9 +8,14 @@
 它只记「调了什么、成没成、结果是什么」，供重规划与收尾引用，
 并按规则去重、降级。
 
+**目标锚**（AgentState.anchor）是一次会话里不变的部分：用户目标与首次拆解。
+它在每一轮重规划里都不可裁，使新计划始终有一个「原本要做什么」可以对照。
+
 ★ 本包是纯 Python：不 import langgraph，不调用模型，没有副作用。
 """
 
-from .episodic import Episode, dedupe, history, render, settle, summarize
+from . import anchor, episodic
+from .anchor import Anchor
+from .episodic import Episode
 
-__all__ = ["Episode", "dedupe", "history", "render", "settle", "summarize"]
+__all__ = ["Anchor", "Episode", "anchor", "episodic"]

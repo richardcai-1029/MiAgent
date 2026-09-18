@@ -6,7 +6,7 @@
 
 from miagent.graph import dag
 from miagent.graph.state import TaskStatus, new_task
-from miagent.memory import episodic
+from miagent.memory import anchor, episodic
 from miagent.protocol import ErrorCode
 
 
@@ -137,3 +137,45 @@ class TestAncestors:
 
     def test_no_dependencies(self):
         assert dag.ancestors({"a": pending("a")}, {"a"}) == set()
+
+
+class TestAnchor:
+    def test_intent_follows_task_id_order(self):
+        tasks = {"t2": pending("t2"), "t1": pending("t1")}
+        a = anchor.build("订餐", tasks)
+        assert a == {"goal": "订餐", "intent": ["任务 t1", "任务 t2"]}
+
+    def test_render_is_not_reducible(self):
+        section = anchor.render(anchor.build("订餐", {"t1": pending("t1")}))
+        assert section.priority == 0 and section.compact is None
+        assert "用户目标：订餐" in section.text and "1. 任务 t1" in section.text
+
+    def test_empty_plan_still_renders_the_goal(self):
+        assert "（无）" in anchor.render(anchor.build("你好", {})).text
+
+
+class TestRepeatsFailures:
+    def _failed_episodes(self):
+        return episodic.settle({"t1": failed("t1", tool="book", name="A"),
+                                "t2": done("t2", tool="echo", text="x")}, [], 0)
+
+    def test_all_new_tasks_are_failed_calls(self):
+        new = {"r1_t1": pending("r1_t1", tool="book", name="A")}
+        assert episodic.repeats_failures(new, self._failed_episodes())
+
+    def test_a_single_new_call_breaks_the_loop(self):
+        new = {"r1_t1": pending("r1_t1", tool="book", name="A"),
+               "r1_t3": pending("r1_t3", tool="book", name="B")}
+        assert not episodic.repeats_failures(new, self._failed_episodes())
+
+    def test_repeating_a_success_is_not_spinning(self):
+        """成功过的调用再做一次不是打转 —— 判据只看失败记录。"""
+        new = {"r1_t2": pending("r1_t2", tool="echo", text="x")}
+        assert not episodic.repeats_failures(new, self._failed_episodes())
+
+    def test_different_arguments_are_a_new_attempt(self):
+        new = {"r1_t1": pending("r1_t1", tool="book", name="B")}
+        assert not episodic.repeats_failures(new, self._failed_episodes())
+
+    def test_empty_plan_is_not_spinning(self):
+        assert not episodic.repeats_failures({}, self._failed_episodes())

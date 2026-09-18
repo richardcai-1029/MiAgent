@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from ..llm import system, user
 from ..llm.context import Section, fit
-from ..memory import Episode, episodic
+from ..memory import Episode, anchor as anchor_mod, episodic
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
 from . import dag, dataflow
@@ -162,6 +162,8 @@ def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
     layers = dag.parallel_layers(tasks)
     return {
         "tasks": tasks, "verdict": None,
+        # 目标锚在这里写入，此后只读：之后每一轮重规划都以首次拆解为参照。
+        "anchor": anchor_mod.build(state["user_request"], tasks),
         "trace": [f"planner: {len(tasks)} 个任务，{len(layers)} 层依赖 → {layers}"
                   + _trace_trim(notes)],
     }
@@ -392,8 +394,10 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
             + " 原任务图中有任务失败了，请基于已完成的结果重新规划【剩余】工作，"
               "避开失败的做法。新任务可以依赖已完成任务的 id。",
             [
+                # 目标锚放最前、不可裁：几轮重规划之后提示词里全是局部的成败记录，
+                # 新计划要有一个「原本要做什么」可以对照，否则越走越偏且无从察觉。
+                anchor_mod.render(state["anchor"]),
                 _tools_section(deps.registry),
-                Section("用户目标", f"用户目标：{state['user_request']}"),
                 # 已完成的结果原文最先被削减：重规划真正需要的是「哪条路走不通」，
                 # 已完成部分只要知道有多少即可，具体结果下游任务可以再引用。
                 Section("已完成", f"已完成：\n{done_text}", priority=3,
@@ -413,6 +417,17 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
 
     new_ids = set(merged) - set(done)
     added = len(new_ids)
+
+    # 原地打转：新计划里的每一个调用都失败过。执行它们只会得到同样的失败，
+    # 白白消耗端侧算力与执行预算。据实判定为无进展循环（AG-1003），不派发。
+    if episodic.repeats_failures({tid: merged[tid] for tid in new_ids}, episodes):
+        code = ErrorCode.AG_PLAN_NO_PROGRESS
+        return {"tasks": {}, "episodes": settled, "dispatch": [], "verdict": None,
+                "failure": code.value, "replan_count": generation,
+                "errors": [{"stage": "replanner", "code": code.value,
+                            "repeated": sorted(new_ids)}],
+                "trace": [f"replanner: 第 {generation} 次重规划，新增 {added} 个任务"
+                          f"全部是失败过的调用，判定无进展（{code}）" + _trace_trim(notes)]}
 
     # 只留新任务引用到的已完成任务（含其上游）：validate 要求依赖边指向图里
     # 存在的任务，且派发前要取它们的结果。其余终态任务已在情景记忆里。

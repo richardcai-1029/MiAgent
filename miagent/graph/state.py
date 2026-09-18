@@ -93,6 +93,10 @@ class AgentState(TypedDict, total=False):
     # ---------- 任务图：唯一事实来源 ----------
     tasks: dict[str, Task]
 
+    # 目标锚：首次规划成功后写入，此后只读，见 miagent.memory.anchor。
+    # 元素类型是 memory.Anchor；这里不引用它，state 不依赖 memory。
+    anchor: dict[str, Any]
+
     # ---------- 本轮调度 ----------
     # 列表而非单个：同一轮里彼此无依赖的任务会被一起派发。
     dispatch: list[DispatchItem]
@@ -144,6 +148,7 @@ def initial_state(user_request: str) -> AgentState:
     return AgentState(
         user_request=user_request,
         tasks={},
+        anchor={},
         dispatch=[],
         outcomes=[],
         errors=[],

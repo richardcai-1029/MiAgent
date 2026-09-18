@@ -691,3 +691,77 @@ class TestWorkingMemoryIsPruned:
             replan=plan(task("t4", "echo", ["nope"], text="C"))))    # 依赖不存在
         assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
         assert "t2" in out["execution_summary"]["completed"]
+
+
+# ============================================================
+# 目标锚：重规划始终有「原本要做什么」可以对照
+# ============================================================
+
+
+class TestGoalAnchor:
+    def test_planner_writes_the_anchor_once(self, registry):
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.query_calendar", when="今晚"),
+                 task("t2", "system.book_restaurant", ["t1"], name="小馆 A")),
+            replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
+        assert out["anchor"] == {"goal": "订餐", "intent": ["任务 t1", "任务 t2"]}
+
+    def test_failed_planning_leaves_no_anchor(self, registry):
+        out = run(registry, "随便说说", llm_for("我不知道该怎么办"))
+        assert out["anchor"] == {}
+
+    def test_replanner_sees_the_anchor_first(self, registry):
+        llm = llm_for(
+            plan(task("t1", "system.book_restaurant", name="小馆 A")),
+            replan=plan(task("t1b", "system.book_restaurant", name="小馆 B")))
+        run(registry, "订餐", llm)
+        replan_prompt = next(m[1].content for m in llm.seen if "重规划器" in m[0].content)
+        assert replan_prompt.startswith("用户目标：订餐\n最初的拆解：\n  1. 任务 t1")
+
+    def test_anchor_survives_trimming_that_drops_everything_else(self, registry):
+        """窗口紧张时先削工具描述与历史，锚一个字都不能少。"""
+        from miagent.llm.context import SEPARATOR, Section, fit
+        from miagent.memory import anchor as anchor_mod
+
+        a = anchor_mod.render(anchor_mod.build("订餐", {"t1": new_task("t1", "查日历", "echo")}))
+        tools = _tools_section(registry)
+        failed = Section("失败", "失败：" + "x" * 500, priority=2, compact="有 1 个失败")
+        # 预算恰好只够放下锚加上另外两段的紧凑形式
+        limit = len(SEPARATOR.join([a.text, tools.compact, failed.compact]))
+        body, notes = fit([a, tools, failed], limit=limit, estimate=len)
+        assert notes == ["失败→紧凑形式", "工具描述→紧凑形式"]
+        assert body.startswith(a.text)
+
+
+# ============================================================
+# 原地打转：新计划全是失败过的调用
+# ============================================================
+
+
+class TestSpinningIsDetected:
+    def test_identical_replan_is_not_executed(self, registry):
+        """把失败过的调用原样再拆一遍，执行只会得到同样的失败。"""
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.book_restaurant", name="小馆 A")),
+            replan=plan(task("t1_again", "system.book_restaurant", name="小馆 A"))))
+        assert out["failure"] == ErrorCode.AG_PLAN_NO_PROGRESS.value
+        assert out["execution_count"] == 1                    # 重复的那次没有派发
+        assert out["tasks"] == {}
+        assert out["errors"][-1]["repeated"] == ["r1_t1_again"]
+        assert any("判定无进展" in l for l in out["trace"])
+
+    def test_changed_arguments_are_a_real_retry(self, registry):
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.book_restaurant", name="小馆 A")),
+            replan=plan(task("t1b", "system.book_restaurant", name="小馆 B"))))
+        assert out["failure"] is None
+        assert out["execution_count"] == 2
+
+    def test_partially_new_plan_is_allowed(self, registry):
+        """换方案的同时保留了某一步：那一步是否再次失败由执行回答，不猜。"""
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.book_restaurant", name="小馆 A")),
+            replan=plan(task("t1_again", "system.book_restaurant", name="小馆 A"),
+                        task("t2", "system.query_calendar", when="今晚"))))
+        assert not any("判定无进展" in l for l in out["trace"])
+        assert out["execution_count"] >= 3                    # 新计划被派发了
