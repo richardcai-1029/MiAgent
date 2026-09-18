@@ -15,6 +15,7 @@ from langgraph.types import Send
 from miagent.graph.state import (MAX_REPLANS, MAX_TOTAL_EXECUTIONS,
                                  TaskOutcome, TaskStatus, new_task)
 from miagent.llm import FakeLLM
+from miagent.memory import episodic
 from miagent.mock_server import MiClawMockServer
 from miagent.protocol import ErrorCode
 from miagent.tools import ToolRegistry, ToolSource, tool
@@ -255,17 +256,18 @@ class TestEndToEnd:
                  task("t2", "system.book_restaurant", ["t1"], name="小馆 A")),
             replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
         assert out["failure"] is None
-        assert out["tasks"]["t1"]["status"] is TaskStatus.DONE
-        assert out["tasks"]["t1"]["retry_count"] == 1        # 只跑过一次
+        assert "t1" in out["execution_summary"]["completed"]
+        assert sum("t1 ✓" in l for l in out["trace"]) == 1     # 只跑过一次
         assert "r1_t2b" in out["tasks"]
 
     def test_replan_keeps_failure_history(self, registry):
-        """失败的任务保留在图里，否则用户看不到试过什么。"""
+        """失败的任务进入情景记忆，否则用户看不到试过什么。"""
         out = run(registry, "订餐", llm_for(
             plan(task("t1", "system.book_restaurant", name="小馆 A")),
             replan=plan(task("t1b", "system.book_restaurant", name="小馆 B"))))
-        assert out["tasks"]["t1"]["status"] is TaskStatus.FAILED
-        assert out["tasks"]["t1"]["error"] == "MC-4002"
+        failed = [e for e in out["episodes"] if not e["ok"]]
+        assert [e["task_id"] for e in failed] == ["t1"]
+        assert failed[0]["error"] == "MC-4002"
         assert out["execution_summary"]["failed"] == ["t1"]
 
     def test_cyclic_plan_rejected_before_execution(self, registry):
@@ -560,7 +562,7 @@ class TestCompletionIsVerified:
             plan(task("t1", "echo", text="A"),
                  task("t2", "join", left="只给了一个参数")),
             replan=plan()))
-        assert out["tasks"]["t2"]["status"] is TaskStatus.FAILED
+        assert out["execution_summary"]["failed"] == ["t2"]
         assert out["failure"] == ErrorCode.AG_TOOL_SCHEMA_INVALID.value
 
     def test_successful_replan_is_not_reported_as_failure(self, registry):
@@ -572,29 +574,120 @@ class TestCompletionIsVerified:
             replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
         assert out["failure"] is None
 
-    def _failed(self, tid, code):
+    def _failed(self, tid, code, generation=0):
         t = new_task(tid, f"任务 {tid}", "echo")
         t["status"], t["error"] = TaskStatus.FAILED, code
-        return t
+        return episodic.settle({tid: t}, [], generation)[0]
 
     def test_root_cause_is_preferred_over_cascaded_code(self):
         """级联失败的错误码统一是 AG-1005（前置任务失败），只说明被牵连，
         对用户没有信息量 —— 收尾时要给出根因。"""
         from miagent.graph.nodes import _root_failure
 
-        tasks = {
-            "t1": self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value),
-            "t2": self._failed("t2", ErrorCode.MC_PERMISSION_DENIED.value),
-        }
-        assert _root_failure(tasks, ["t1", "t2"]) == ErrorCode.MC_PERMISSION_DENIED.value
+        episodes = [
+            self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value),
+            self._failed("t2", ErrorCode.MC_PERMISSION_DENIED.value),
+        ]
+        assert _root_failure(episodes) == ErrorCode.MC_PERMISSION_DENIED.value
+
+    def test_latest_generation_wins_among_own_failures(self):
+        from miagent.graph.nodes import _root_failure
+
+        episodes = [
+            self._failed("t1", ErrorCode.MC_PERMISSION_DENIED.value, generation=0),
+            self._failed("r1_t1", ErrorCode.MC_RESOURCE_MEMORY_LIMIT.value, generation=1),
+        ]
+        assert _root_failure(episodes) == ErrorCode.MC_RESOURCE_MEMORY_LIMIT.value
 
     def test_all_cascaded_falls_back_to_the_first(self):
         from miagent.graph.nodes import _root_failure
 
-        tasks = {"t1": self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value)}
-        assert _root_failure(tasks, ["t1"]) == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
+        episodes = [self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value)]
+        assert _root_failure(episodes) == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
 
     def test_no_failures_means_no_failure_code(self):
         from miagent.graph.nodes import _root_failure
 
-        assert _root_failure({}, []) is None
+        assert _root_failure([]) is None
+
+
+# ============================================================
+# 执行上下文清理：终态任务离开任务图，进入情景记忆
+# ============================================================
+
+
+class TestWorkingMemoryIsPruned:
+    """任务图只装还要调度的东西；历史交给 episodes。"""
+
+    def test_unreferenced_terminal_tasks_leave_the_graph(self, registry):
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.query_calendar", when="今晚"),
+                 task("t2", "system.book_restaurant", ["t1"], name="小馆 A")),
+            replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
+        assert set(out["tasks"]) == {"r1_t2b"}
+        assert [e["task_id"] for e in out["episodes"]] == ["t1", "t2", "r1_t2b"]
+        assert any("结算 2 条记录，保留 0 个已完成" in l for l in out["trace"])
+
+    def test_referenced_done_task_stays_for_its_result(self, registry):
+        """新任务用 $from 引用已完成任务时，被引用者必须还在图里，派发前要取值。"""
+        out = run(registry, "汇总", llm_for(
+            plan(task("t1", "echo", text="A"),
+                 task("t2", "join", left="只给了一个参数")),
+            replan=plan(task("t3", "join", left={REF: "t1"}, right="B"))))
+        assert out["failure"] is None
+        assert set(out["tasks"]) == {"t1", "r1_t3"}
+        assert out["tasks"]["r1_t3"]["result"] == "A|B"
+
+    def test_ancestors_of_referenced_tasks_stay_too(self, registry):
+        """依赖是传递的：留下 t2 就得留下 t2 的上游，否则图校验会报依赖缺失。"""
+        out = run(registry, "汇总", llm_for(
+            plan(task("t1", "echo", text="A"),
+                 task("t2", "join", left={REF: "t1"}, right="B"),
+                 task("t3", "join", ["t2"], left="只给了一个参数")),
+            replan=plan(task("t4", "echo", text={REF: "t2"}))))
+        assert out["failure"] is None
+        assert set(out["tasks"]) == {"t1", "t2", "r1_t4"}
+        assert out["tasks"]["r1_t4"]["result"] == "A|B"
+
+    def test_superseded_pending_tasks_are_dropped(self, registry):
+        """尚未执行、被新计划取代的任务不进历史 —— 它们没有发生过。"""
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.book_restaurant", name="小馆 A"),
+                 task("t2", "system.create_event", ["t1"], title="晚餐", when="19:00")),
+            replan=plan(task("t1b", "system.book_restaurant", name="小馆 B"))))
+        assert out["failure"] is None
+        assert [e["task_id"] for e in out["episodes"]] == ["t1", "r1_t1b"]
+
+    def test_cascaded_failures_are_settled_at_finalize(self, registry):
+        """中止路径上被级联标记失败的任务没经过 Evaluator，收尾时仍要进入历史。"""
+        s = initial_state("订餐")
+        s["tasks"] = {"t1": new_task("t1", "订餐", "system.book_restaurant", {"name": "A"}),
+                      "t2": new_task("t2", "建日程", "system.create_event", {}, ["t1"])}
+        s["tasks"]["t1"]["status"], s["tasks"]["t1"]["error"] = TaskStatus.FAILED, "MC-4002"
+        s["failure"] = "MC-4002"
+        out = finalizer(s, Deps(llm=FakeLLM(["未完成"]), registry=registry))
+        assert out["execution_summary"]["failed"] == ["t1", "t2"]
+        codes = {e["task_id"]: e["error"] for e in out["episodes"]}
+        assert codes["t2"] == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
+
+    def test_summary_survives_pruning(self, registry):
+        """执行概况从情景记忆与任务图合并得出，清理不影响用户看到的结果。"""
+        out = run(registry, "订餐", llm_for(
+            plan(task("t1", "system.query_calendar", when="今晚"),
+                 task("t2", "system.book_restaurant", ["t1"], name="小馆 A")),
+            replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
+        s = out["execution_summary"]
+        assert s["completed"] == ["t1", "r1_t2b"]
+        assert s["failed"] == ["t2"]
+        assert "t1" in s["results"]
+        assert s["total"] == 3
+
+    def test_failed_replan_is_not_masked_by_later_successes(self, registry):
+        """重规划失败后，剩余任务照常执行；它们成功不代表恢复发生了。"""
+        out = run(registry, "汇总", llm_for(
+            plan(task("t1", "echo", text="A"),
+                 task("t2", "echo", ["t1"], text="B"),
+                 task("t3", "join", left="只给了一个参数")),
+            replan=plan(task("t4", "echo", ["nope"], text="C"))))    # 依赖不存在
+        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert "t2" in out["execution_summary"]["completed"]

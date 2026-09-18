@@ -106,6 +106,24 @@ def tool_results(tasks: Tasks) -> dict[str, str]:
     return {tid: t["result"] for tid, t in tasks.items() if t["result"] is not None}
 
 
+def ancestors(tasks: Tasks, roots: set[str]) -> set[str]:
+    """roots 直接或间接依赖的全部任务 id（不含 roots 自身）。
+
+    重规划后只有这些已完成任务需要留在图里：新任务要引用它们的结果，
+    而 validate 要求每条依赖边都指向图里存在的任务。其余终态任务已进入
+    情景记忆，继续留在图里只是冗余。
+    """
+    out: set[str] = set()
+    stack = [d for r in roots if r in tasks for d in tasks[r]["dependencies"]]
+    while stack:
+        tid = stack.pop()
+        if tid in out or tid not in tasks:
+            continue
+        out.add(tid)
+        stack.extend(tasks[tid]["dependencies"])
+    return out - roots
+
+
 # ============================================================
 # 三、调度判定
 # ============================================================

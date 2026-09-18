@@ -24,6 +24,7 @@ LIGHT_MODULES = [
     "miagent.graph.dag",    # 依赖解析是纯函数
     "miagent.graph.state",
     "miagent.graph.schema",
+    "miagent.memory",       # 情景记忆是纯函数
 ]
 
 FORBIDDEN = ["langgraph", "langchain_core", "langsmith", "requests",

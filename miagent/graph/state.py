@@ -5,10 +5,14 @@
 
     task.status == pending 且所有 dependencies 都 done  →  可执行
 
-tasks 是任务状态的唯一事实来源。「已完成/执行中/已失败的任务」
-「各任务的结果」这类信息都从它派生（见 dag.py），不另存字段 ——
+tasks 是调度状态的唯一事实来源：只装当前还要调度的任务。「哪些就绪」
+「是否死锁」「是否完成」都从它派生（见 dag.py），不另存字段 ——
 同一事实存两份，任一处漏更新就会让 Scheduler 看到自相矛盾的状态，
 且不报错，只表现为行为异常。
+
+到了终态的任务在重规划时离开 tasks，压缩为 episodes（见 miagent.memory）。
+两者各管一段生命周期：tasks 是工作记忆，episodes 是情景记忆；
+执行概况从两者合并得出。
 """
 
 from __future__ import annotations
@@ -98,6 +102,9 @@ class AgentState(TypedDict, total=False):
     # ---------- 历史（只增不改，用 reducer）----------
     errors: Annotated[list[dict[str, Any]], operator.add]
     trace: Annotated[list[str], operator.add]
+    # 情景记忆：离开任务图的终态任务压缩后的记录，见 miagent.memory。
+    # 元素类型是 memory.Episode；这里不引用它，state 不依赖 memory。
+    episodes: Annotated[list[dict[str, Any]], operator.add]
 
     # ---------- 循环控制 ----------
     verdict: Verdict | None
@@ -141,6 +148,7 @@ def initial_state(user_request: str) -> AgentState:
         outcomes=[],
         errors=[],
         trace=[],
+        episodes=[],
         verdict=None,
         replan_count=0,
         execution_count=0,
