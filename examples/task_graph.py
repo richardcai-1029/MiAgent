@@ -31,7 +31,8 @@ def make_llm(first, replan=None, answer="完成。"):
             return replan or plan()
         if "规划器" in role:
             return first
-        return answer
+        # 收尾是结构化输出：回答给用户，摘要给下一轮
+        return json.dumps({"answer": answer, "summary": answer}, ensure_ascii=False)
     return FakeLLM(responder=responder)
 
 

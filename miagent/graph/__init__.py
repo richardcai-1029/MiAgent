@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import dag
 from .nodes_meta import Deps  # noqa: F401  轻量转发，见该模块说明
-from .schema import TaskPlan, TaskSpec, task_plan_model_for
+from .schema import FinalOutput, TaskPlan, TaskSpec, task_plan_model_for
 from .state import (
     MAX_ATTEMPTS_PER_TASK,
     MAX_REPLANS,
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_ATTEMPTS_PER_TASK", "MAX_REPLANS", "MAX_TOTAL_EXECUTIONS",
-    "AgentState", "Deps", "DispatchItem", "Task", "TaskOutcome",
+    "AgentState", "Deps", "DispatchItem", "FinalOutput", "Task", "TaskOutcome",
     "TaskPlan", "TaskSpec", "TaskStatus",
     "build_agent", "dag", "initial_state", "new_task", "task_plan_model_for",
 ]

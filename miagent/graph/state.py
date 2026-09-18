@@ -120,6 +120,7 @@ class AgentState(TypedDict, total=False):
     # ---------- 输出 ----------
     execution_summary: dict[str, Any]
     final_answer: str
+    turn_summary: str           # 本轮摘要，供下一轮规划参考
     failure: str | None         # 非空表示任务未完成，值为错误码
 
 
@@ -159,5 +160,6 @@ def initial_state(user_request: str) -> AgentState:
         execution_count=0,
         execution_summary={},
         final_answer="",
+        turn_summary="",
         failure=None,
     )

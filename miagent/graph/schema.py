@@ -40,6 +40,17 @@ class TaskPlan(BaseModel):
                     "无依赖关系的任务可并行执行。无需工具时为空数组")
 
 
+class FinalOutput(BaseModel):
+    """收尾节点的产出。一次调用同时给出回答与本轮摘要：
+    回答给用户，摘要给下一轮规划 —— 不为摘要多烧一轮端侧推理。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str = Field(description="给用户的回答。简洁，只说结论，不复述过程")
+    summary: str = Field(description="本轮摘要：做了什么、结论是什么。"
+                                     "供下一轮规划参考，一两句话")
+
+
 def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
     """按当前可用工具生成收紧的模型：工具名成为 schema 里的枚举。
 

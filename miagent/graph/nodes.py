@@ -26,7 +26,7 @@ from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
 from . import dag, dataflow
 from .nodes_meta import Deps
-from .schema import task_plan_model_for
+from .schema import FinalOutput, task_plan_model_for
 from .state import (
     MAX_ATTEMPTS_PER_TASK,
     DispatchItem,
@@ -461,12 +461,16 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
     detail = "\n".join(episodic.history(episodes, tasks)) or "  （未执行任何任务）"
 
     if state.get("failure"):
-        ask = (f"任务未能完成（错误码 {state['failure']}）。请说明做到了哪一步、"
+        ask = (f"任务未能完成（错误码 {state['failure']}）。回答请说明做到了哪一步、"
                f"卡在哪里、建议用户怎么办。")
     else:
-        ask = "请根据执行结果，用一两句话回答用户。"
+        ask = "请根据执行结果回答用户。"
+    ask += " 另给出本轮摘要，供下一轮规划参考。"
 
     role = "你是端侧智能助理。回答要简洁，只说结论，不复述过程。"
+    # 与 _plan 相同：complete_structured 会另外注入一份 schema，预算里要留出位置。
+    schema_json = json.dumps(FinalOutput.model_json_schema(), ensure_ascii=False)
+    reserve = deps.llm.estimate(schema_json) + deps.llm.estimate(role)
     try:
         body, notes = fit([
             Section("用户目标", f"用户目标：{state['user_request']}"),
@@ -475,19 +479,22 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
                     compact=f"执行情况：成功 {len(summary['completed'])} 个、"
                             f"失败 {len(summary['failed'])} 个（明细从略）"),
             Section("要求", ask),
-        ], deps.llm.context_limit - deps.llm.estimate(role), deps.llm.estimate)
-        answer = deps.llm.complete([system(role), user(body)]).content
+        ], deps.llm.context_limit - reserve, deps.llm.estimate)
+        output = deps.llm.complete_structured([system(role), user(body)], FinalOutput)
+        answer, turn_summary = output.answer, output.summary
         note = _trace_trim(notes)
     except AgentError as e:
-        if e.code is not ErrorCode.AG_CONTEXT_OVERFLOW:
+        if e.code not in (ErrorCode.AG_CONTEXT_OVERFLOW, ErrorCode.AG_LLM_INVALID_RESPONSE):
             raise
-        # 削减到不可裁片段仍放不下。回答不该因此缺席 —— 用确定性的执行概况
-        # 兜底，用户至少知道做到了哪一步。
-        answer = _summary_answer(state, summary)
-        note = f"（上下文放不下，改用确定性摘要：{e.code}）"
+        # 窗口放不下，或自修复后输出仍不合 schema。回答不该因此缺席 ——
+        # 用确定性的执行概况兜底，用户至少知道做到了哪一步；摘要同源，
+        # 保证下一轮总有东西可参考。
+        answer = turn_summary = _summary_answer(state, summary)
+        why = "上下文放不下" if e.code is ErrorCode.AG_CONTEXT_OVERFLOW else "模型输出不合 schema"
+        note = f"（{why}，改用确定性摘要：{e.code}）"
 
     return {"tasks": tasks, "episodes": settled, "final_answer": answer,
-            "execution_summary": summary,
+            "turn_summary": turn_summary, "execution_summary": summary,
             "trace": ["finalizer: 已生成回答" + note]}
 
 

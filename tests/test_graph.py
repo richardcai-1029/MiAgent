@@ -64,6 +64,10 @@ def plan(*tasks):
     return json.dumps({"tasks": list(tasks)}, ensure_ascii=False)
 
 
+def final(answer="完成", summary="本轮已完成"):
+    return json.dumps({"answer": answer, "summary": summary}, ensure_ascii=False)
+
+
 def llm_for(first, replan=None, answer="完成"):
     def responder(msgs):
         role = msgs[0].content
@@ -71,7 +75,7 @@ def llm_for(first, replan=None, answer="完成"):
             return replan or plan()
         if "规划器" in role:
             return first
-        return answer
+        return final(answer)
     return FakeLLM(responder=responder)
 
 
@@ -491,6 +495,7 @@ class TestContextBudget:
 
         out = finalizer(state, Deps(llm=llm, registry=registry))
         assert out["final_answer"].startswith("已完成 1 项")
+        assert out["turn_summary"] == out["final_answer"]     # 摘要同源，不缺席
         assert "上下文放不下" in out["trace"][0]
 
     def test_no_trimming_note_when_everything_fits(self, registry):
@@ -665,7 +670,7 @@ class TestWorkingMemoryIsPruned:
                       "t2": new_task("t2", "建日程", "system.create_event", {}, ["t1"])}
         s["tasks"]["t1"]["status"], s["tasks"]["t1"]["error"] = TaskStatus.FAILED, "MC-4002"
         s["failure"] = "MC-4002"
-        out = finalizer(s, Deps(llm=FakeLLM(["未完成"]), registry=registry))
+        out = finalizer(s, Deps(llm=FakeLLM([final("未完成")]), registry=registry))
         assert out["execution_summary"]["failed"] == ["t1", "t2"]
         codes = {e["task_id"]: e["error"] for e in out["episodes"]}
         assert codes["t2"] == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
@@ -765,3 +770,61 @@ class TestSpinningIsDetected:
                         task("t2", "system.query_calendar", when="今晚"))))
         assert not any("判定无进展" in l for l in out["trace"])
         assert out["execution_count"] >= 3                    # 新计划被派发了
+
+
+# ============================================================
+# 收尾的结构化输出：一次调用同时给出回答与本轮摘要
+# ============================================================
+
+
+class TestFinalizerStructuredOutput:
+    def _state(self):
+        state = initial_state("查一下电量")
+        t = new_task("t1", "查电量", "system.get_battery")
+        t["status"], t["result"] = TaskStatus.DONE, "电量 63%"
+        state["tasks"] = {"t1": t}
+        return state
+
+    def test_answer_and_summary_come_from_one_call(self, registry):
+        llm = FakeLLM([final("电量 63%", "查过电量，63%")])
+        out = finalizer(self._state(), Deps(llm=llm, registry=registry))
+        assert out["final_answer"] == "电量 63%"
+        assert out["turn_summary"] == "查过电量，63%"
+        assert llm.call_count == 1
+
+    def test_schema_is_injected_into_the_prompt(self, registry):
+        llm = FakeLLM([final()])
+        finalizer(self._state(), Deps(llm=llm, registry=registry))
+        assert "summary" in llm.seen[-1][-1].content
+        assert "供下一轮规划参考" in llm.seen[-1][-1].content
+
+    def test_unparsable_output_falls_back_after_repair(self, registry):
+        """自修复后仍不合 schema：回答不缺席，摘要同源。"""
+        llm = FakeLLM(responder=lambda _m: "电量还行吧")
+        out = finalizer(self._state(), Deps(llm=llm, registry=registry))
+        assert out["final_answer"].startswith("已完成 1 项")
+        assert out["turn_summary"] == out["final_answer"]
+        assert "模型输出不合 schema" in out["trace"][0]
+        assert llm.repair_count == 1                           # 修过一次才放弃
+
+    def test_repair_feeds_the_error_back(self, registry):
+        """第一次给纯文本，收到错误提示后给出合法 JSON。"""
+        calls = []
+
+        def responder(msgs):
+            calls.append(msgs)
+            return "电量还行吧" if len(calls) == 1 else final("电量 63%", "查过电量")
+
+        llm = FakeLLM(responder=responder)
+        out = finalizer(self._state(), Deps(llm=llm, registry=registry))
+        assert out["final_answer"] == "电量 63%"
+        assert "不符合要求" in calls[1][-1].content
+
+    def test_end_to_end_exposes_turn_summary(self, registry):
+        out = run(registry, "原样返回 hi", llm_for(plan(task("t1", "echo", text="hi"))))
+        assert out["turn_summary"] == "本轮已完成"
+
+    def test_failed_planning_still_yields_a_summary(self, registry):
+        out = run(registry, "随便说说", llm_for("我不知道该怎么办"))
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
+        assert out["turn_summary"]

@@ -127,7 +127,7 @@ schema 校验与自修复重试。这两项对云端模型同样适用，属于�
 | 归一化解析 | `tools/validation.py` | 已落地 |
 | 错误反馈过滤 | `tools/base.py::Tool.invoke` | 已落地 |
 | 计划规模与完成校验 | `nodes._plan`、`nodes.replanner` | 已落地 |
-| schema 收紧 | `graph/schema.py::task_plan_model_for` | 第 1 周已实现 |
+| schema 收紧 | `graph/schema.py::task_plan_model_for`、`FinalOutput` | 第 1 周已实现；收尾输出第 3 周纳入 |
 | 自修复重试 | `llm/base.py::complete_structured` | 第 1 周已实现 |
 | 约束解码 | 同一份 schema 转采样语法 | 待 MiMo 推理栈 |
 | 确定性采样参数 | `LLM` 接口的采样配置 | 待 MiMo 接口 |

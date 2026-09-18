@@ -37,7 +37,8 @@ def plan(*tasks):
 
 
 def llm_for(p, answer="完成"):
-    return FakeLLM(responder=lambda m: p if "规划器" in m[0].content else answer)
+    final = json.dumps({"answer": answer, "summary": answer}, ensure_ascii=False)
+    return FakeLLM(responder=lambda m: p if "规划器" in m[0].content else final)
 
 
 def run(title, tasks_json, registry, **kw):
