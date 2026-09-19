@@ -89,6 +89,9 @@ class TaskOutcome(TypedDict):
 class AgentState(TypedDict, total=False):
     # ---------- 输入 ----------
     user_request: str
+    # 对话历史：之前各轮的记录，由 Session 在 run 时填入，见 miagent.memory.session。
+    # 元素类型是 memory.Turn；这里不引用它，state 不依赖 memory。
+    history: list[dict[str, Any]]
 
     # ---------- 任务图：唯一事实来源 ----------
     tasks: dict[str, Task]
@@ -148,6 +151,7 @@ def initial_state(user_request: str) -> AgentState:
     """带 reducer 的字段必须给初值，否则首次合并会失败。"""
     return AgentState(
         user_request=user_request,
+        history=[],
         tasks={},
         anchor={},
         dispatch=[],

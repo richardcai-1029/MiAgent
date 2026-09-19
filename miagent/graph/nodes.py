@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from ..llm import system, user
 from ..llm.context import Section, fit
 from ..memory import Episode, anchor as anchor_mod, episodic
+from ..memory.session import render_history
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
 from . import dag, dataflow
@@ -143,6 +144,7 @@ _PLANNER_ROLE = (
     "没有先后关系的任务不要写依赖 —— 它们会被并行执行。"
     "某个参数要用到前一个任务的结果时，把该参数的值写成 "
     '{"$from": "那个任务的 id"}，先后关系会由此自动确定。'
+    "若给出了对话历史，当前目标可能承接之前的结论，以历史中的结论为准。"
 )
 
 
@@ -150,6 +152,8 @@ def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
     try:
         tasks, notes = _plan(deps, _PLANNER_ROLE, [
             _tools_section(deps.registry),
+            # 对话历史每轮一段，越旧越先削减；没有历史时这里为空。
+            *render_history(state.get("history", [])),
             Section("用户目标", f"用户目标：{state['user_request']}"),
         ])
     except AgentError as e:
