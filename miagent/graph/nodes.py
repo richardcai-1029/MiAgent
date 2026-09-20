@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from ..llm import system, user
 from ..llm.context import Section, fit
-from ..memory import Episode, anchor as anchor_mod, episodic
+from ..memory import anchor as anchor_mod, ledger
 from ..memory.session import render_history
 from ..protocol import AgentError, ErrorCode, RetryPolicy
 from ..tools import ToolRegistry, ToolSource
@@ -191,7 +191,6 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
         # —— 重规划成功接手时，前一条路失败恰恰是正常剧情。
         # 「恢复机制交了白卷」由 Replanner 自己判定，见该节点。
         return {"tasks": tasks, "dispatch": [], "verdict": None,
-                "execution_summary": episodic.summarize(tasks, state["episodes"]),
                 "trace": [f"scheduler: 全部完成（成功 {n_ok} / 失败 {n_bad}）→ finalizer"]}
 
     # 累计执行预算。此前只在失败分支里检查，因而完全约束不住顺利执行的流程 ——
@@ -199,14 +198,12 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
     if state["execution_count"] >= MAX_TOTAL_EXECUTIONS:
         return {"tasks": tasks, "dispatch": [], "verdict": None,
                 "failure": ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value,
-                "execution_summary": episodic.summarize(tasks, state["episodes"]),
                 "trace": [f"scheduler: 已执行 {state['execution_count']} 次，"
                           f"达到累计预算 {MAX_TOTAL_EXECUTIONS} → finalizer"]}
 
     if dag.is_deadlocked(tasks):
         return {"tasks": tasks, "dispatch": [], "verdict": None,
                 "failure": ErrorCode.AG_DEPENDENCY_UNRESOLVED.value,
-                "execution_summary": episodic.summarize(tasks, state["episodes"]),
                 "trace": ["scheduler: 依赖无法满足，调度死锁 → finalizer"]}
 
     ready_ids = dag.ready(tasks)
@@ -239,20 +236,6 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
         "trace": [f"scheduler: 本轮就绪 {len(ready_ids)} 个，派发 {len(dispatch)} 个"
                   f"{note} → {names}"],
     }
-
-
-def _root_failure(episodes: list[Episode]) -> str | None:
-    """从失败记录里挑出根因的错误码。
-
-    级联失败的错误码统一是 AG-1005（前置任务失败），它只说明"被牵连"，
-    对用户没有信息量。优先取自身失败的那一个；同为自身失败时取最近一轮的。
-    """
-    failed = [e for e in episodes if not e["ok"]]
-    if not failed:
-        return None
-    own = [e for e in failed
-           if e["error"] != ErrorCode.AG_DEPENDENCY_UNRESOLVED.value]
-    return max(own or failed, key=lambda e: e["generation"])["error"]
 
 
 # ============================================================
@@ -376,21 +359,12 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
     否则一次失败会让前面成功的工作全部重做 —— 端侧尤其浪费，
     每次重做都是一次真实的系统调用。
 
-    终态任务在这里离开任务图：先结算为情景记忆，再只把新计划引用到的
-    已完成任务留在图里。图里只装还要调度的东西，历史交给 episodes ——
-    否则每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口。
+    终态任务在这里离开任务图：账本先结算为情景记忆，规划之后再验收 ——
+    只把新计划引用到的已完成任务留在图里，判无进展，定 failure。
+    图里只装还要调度的东西，历史交给 episodes —— 否则每一轮重规划都带着
+    越来越长的历史，挤占端侧本就小的窗口。
     """
-    tasks = state["tasks"]
-    ended = state["replan_count"]            # 刚结束的这一轮
-    generation = ended + 1
-    settled = episodic.settle(tasks, state["episodes"], ended)
-    episodes = [*state["episodes"], *settled]
-    done = {tid: t for tid, t in tasks.items() if t["status"] is TaskStatus.DONE}
-
-    done_text, failed_text = episodic.render(episodes, ended)
-    shown = episodic.dedupe(episodes)
-    n_done = sum(1 for e in shown if e["ok"])
-    n_failed = len(shown) - n_done
+    s = ledger.settle(state["tasks"], state["episodes"], state["replan_count"])
     try:
         merged, notes = _plan(
             deps,
@@ -404,50 +378,38 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
                 _tools_section(deps.registry),
                 # 已完成的结果原文最先被削减：重规划真正需要的是「哪条路走不通」，
                 # 已完成部分只要知道有多少即可，具体结果下游任务可以再引用。
-                Section("已完成", f"已完成：\n{done_text}", priority=3,
-                        compact=f"已完成 {n_done} 个任务（结果从略）"),
+                Section("已完成", f"已完成：\n{s.done_text}", priority=3,
+                        compact=f"已完成 {s.n_done} 个任务（结果从略）"),
                 # 失败信息是重规划的主要依据，比已完成结果后削减。
-                Section("失败", f"失败：\n{failed_text}", priority=2,
-                        compact=f"有 {n_failed} 个任务失败（详情从略）"),
+                Section("失败", f"失败：\n{s.failed_text}", priority=2,
+                        compact=f"有 {s.n_failed} 个任务失败（详情从略）"),
                 Section("要求", "请给出剩余任务。"),
             ],
-            prefix=f"r{generation}_",
-            keep=done,          # 新任务可以依赖已完成任务；失败任务只存在于情景记忆
+            prefix=f"r{s.generation}_",
+            keep=s.keep,        # 新任务可以依赖已完成任务；失败任务只存在于情景记忆
         )
     except AgentError as e:
-        return {"episodes": settled, "replan_count": generation, "failure": e.code.value,
+        return {"episodes": s.new_episodes, "replan_count": s.generation,
+                "failure": e.code.value,
                 "errors": [{"stage": "replanner", "code": e.code.value}],
                 "trace": [f"replanner: 重规划失败 {e.code}"]}
 
-    new_ids = set(merged) - set(done)
-    added = len(new_ids)
+    a = ledger.accept(s, merged)
+    out: dict[str, Any] = {
+        "tasks": a.tasks, "episodes": s.new_episodes, "dispatch": [], "verdict": None,
+        "failure": a.failure, "replan_count": s.generation,
+    }
+    if a.repeated:
+        out["errors"] = [{"stage": "replanner", "code": a.failure, "repeated": a.repeated}]
+        out["trace"] = [f"replanner: 第 {s.generation} 次重规划，新增 {a.added} 个任务"
+                        f"全部是失败过的调用，判定无进展（{a.failure}）" + _trace_trim(notes)]
+        return out
 
-    # 原地打转：新计划里的每一个调用都失败过。执行它们只会得到同样的失败，
-    # 白白消耗端侧算力与执行预算。据实判定为无进展循环（AG-1003），不派发。
-    if episodic.repeats_failures({tid: merged[tid] for tid in new_ids}, episodes):
-        code = ErrorCode.AG_PLAN_NO_PROGRESS
-        return {"tasks": {}, "episodes": settled, "dispatch": [], "verdict": None,
-                "failure": code.value, "replan_count": generation,
-                "errors": [{"stage": "replanner", "code": code.value,
-                            "repeated": sorted(new_ids)}],
-                "trace": [f"replanner: 第 {generation} 次重规划，新增 {added} 个任务"
-                          f"全部是失败过的调用，判定无进展（{code}）" + _trace_trim(notes)]}
-
-    # 只留新任务引用到的已完成任务（含其上游）：validate 要求依赖边指向图里
-    # 存在的任务，且派发前要取它们的结果。其余终态任务已在情景记忆里。
-    needed = dag.ancestors(merged, new_ids)
-    pruned = {tid: t for tid, t in merged.items() if tid in new_ids or tid in needed}
-
-    # 重规划是失败之后的恢复机制。它跑完却一个新任务都没产出，说明恢复没有
-    # 发生，而失败的部分不会再有人接手 —— 若照常收尾，用户会拿到一个声称完成、
-    # 实则漏做了事情的回答。据实标记为未达成，错误码取根因。
-    failure = _root_failure(episodes) if added == 0 else None
-    note = f"，未产出新任务，判定未达成（{failure}）" if failure else ""
-    return {"tasks": pruned, "episodes": settled, "dispatch": [], "verdict": None,
-            "failure": failure, "replan_count": generation,
-            "trace": [f"replanner: 第 {generation} 次重规划，结算 {len(settled)} 条记录，"
-                      f"保留 {len(needed)} 个已完成供引用，新增 {added} 个任务{note}"
-                      + _trace_trim(notes)]}
+    note = f"，未产出新任务，判定未达成（{a.failure}）" if a.failure else ""
+    out["trace"] = [f"replanner: 第 {s.generation} 次重规划，结算 {len(s.new_episodes)} 条记录，"
+                    f"保留 {a.kept} 个已完成供引用，新增 {a.added} 个任务{note}"
+                    + _trace_trim(notes)]
+    return out
 
 
 # ============================================================
@@ -456,13 +418,11 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
 
 
 def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
-    tasks = dag.cascade_failures(state["tasks"])
-    # 结算剩余的终态任务：收尾之后 episodes 就是这一轮完整的执行历史。
-    settled = episodic.settle(tasks, state["episodes"], state["replan_count"])
-    episodes = [*state["episodes"], *settled]
-    summary = episodic.summarize(tasks, episodes)
+    # 收账：结算剩余的终态任务，收尾之后 episodes 就是这一轮完整的执行历史。
+    c = ledger.close(state["tasks"], state["episodes"], state["replan_count"])
+    summary = c.summary
 
-    detail = "\n".join(episodic.history(episodes, tasks)) or "  （未执行任何任务）"
+    detail = "\n".join(c.history) or "  （未执行任何任务）"
 
     if state.get("failure"):
         ask = (f"任务未能完成（错误码 {state['failure']}）。回答请说明做到了哪一步、"
@@ -497,7 +457,7 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
         why = "上下文放不下" if e.code is ErrorCode.AG_CONTEXT_OVERFLOW else "模型输出不合 schema"
         note = f"（{why}，改用确定性摘要：{e.code}）"
 
-    return {"tasks": tasks, "episodes": settled, "final_answer": answer,
+    return {"tasks": c.tasks, "episodes": c.new_episodes, "final_answer": answer,
             "turn_summary": turn_summary, "execution_summary": summary,
             "trace": ["finalizer: 已生成回答" + note]}
 

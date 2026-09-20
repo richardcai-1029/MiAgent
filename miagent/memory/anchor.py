@@ -16,15 +16,10 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
-
-from ..graph.state import Task
+from ..graph.state import Anchor, Task
 from ..llm.context import Section
 
-
-class Anchor(TypedDict):
-    goal: str               # 用户目标原文
-    intent: list[str]       # 首次拆解的各步描述，按任务 id 排序
+__all__ = ["Anchor", "build", "render"]
 
 
 def build(goal: str, tasks: dict[str, Task]) -> Anchor:

@@ -15,19 +15,12 @@ Session 持有历次轮次的记录，把它们作为对话历史传给下一轮
 
 from __future__ import annotations
 
-from typing import Any, Protocol, TypedDict
+from typing import Any, Protocol
 
-from ..graph.state import AgentState, initial_state
+from ..graph.state import AgentState, Turn, initial_state
 from ..llm.context import Section
-from .episodic import Episode
 
-
-class Turn(TypedDict):
-    request: str
-    answer: str
-    summary: str                # 收尾产出的本轮摘要，下一轮规划看的就是它
-    failure: str | None         # 非空表示这一轮没完成，值为错误码
-    episodes: list[Episode]     # 这一轮的执行历史，供调用方查看，不进提示词
+__all__ = ["Agent", "Session", "Turn", "render_history"]
 
 
 class Agent(Protocol):

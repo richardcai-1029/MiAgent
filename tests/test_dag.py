@@ -146,7 +146,3 @@ class TestDerivedViews:
         assert dag.parallel_layers(mk(("A", []), ("B", ["A"]), ("C", ["A"]),
                                       ("D", ["B", "C"]))) == \
             [["A"], ["B", "C"], ["D"]]
-
-    def test_summary_shape(self):
-        s = dag.summary(mark(mk(("A", []), ("B", ["A"])), A=TaskStatus.DONE))
-        assert s["total"] == 2 and s["completed"] == ["A"]

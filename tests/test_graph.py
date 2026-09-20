@@ -15,7 +15,6 @@ from langgraph.types import Send
 from miagent.graph.state import (MAX_REPLANS, MAX_TOTAL_EXECUTIONS,
                                  TaskOutcome, TaskStatus, new_task)
 from miagent.llm import FakeLLM
-from miagent.memory import episodic
 from miagent.mock_server import MiClawMockServer
 from miagent.protocol import ErrorCode
 from miagent.tools import ToolRegistry, ToolSource, tool
@@ -579,50 +578,16 @@ class TestCompletionIsVerified:
             replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
         assert out["failure"] is None
 
-    def _failed(self, tid, code, generation=0):
-        t = new_task(tid, f"任务 {tid}", "echo")
-        t["status"], t["error"] = TaskStatus.FAILED, code
-        return episodic.settle({tid: t}, [], generation)[0]
-
-    def test_root_cause_is_preferred_over_cascaded_code(self):
-        """级联失败的错误码统一是 AG-1005（前置任务失败），只说明被牵连，
-        对用户没有信息量 —— 收尾时要给出根因。"""
-        from miagent.graph.nodes import _root_failure
-
-        episodes = [
-            self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value),
-            self._failed("t2", ErrorCode.MC_PERMISSION_DENIED.value),
-        ]
-        assert _root_failure(episodes) == ErrorCode.MC_PERMISSION_DENIED.value
-
-    def test_latest_generation_wins_among_own_failures(self):
-        from miagent.graph.nodes import _root_failure
-
-        episodes = [
-            self._failed("t1", ErrorCode.MC_PERMISSION_DENIED.value, generation=0),
-            self._failed("r1_t1", ErrorCode.MC_RESOURCE_MEMORY_LIMIT.value, generation=1),
-        ]
-        assert _root_failure(episodes) == ErrorCode.MC_RESOURCE_MEMORY_LIMIT.value
-
-    def test_all_cascaded_falls_back_to_the_first(self):
-        from miagent.graph.nodes import _root_failure
-
-        episodes = [self._failed("t1", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value)]
-        assert _root_failure(episodes) == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
-
-    def test_no_failures_means_no_failure_code(self):
-        from miagent.graph.nodes import _root_failure
-
-        assert _root_failure([]) is None
-
-
 # ============================================================
 # 执行上下文清理：终态任务离开任务图，进入情景记忆
 # ============================================================
 
 
 class TestWorkingMemoryIsPruned:
-    """任务图只装还要调度的东西；历史交给 episodes。"""
+    """任务图只装还要调度的东西；历史交给 episodes。
+
+    边界在 test_ledger.py 穷举；这里只证明图把账本接上了。
+    """
 
     def test_unreferenced_terminal_tasks_leave_the_graph(self, registry):
         out = run(registry, "订餐", llm_for(
@@ -631,7 +596,8 @@ class TestWorkingMemoryIsPruned:
             replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
         assert set(out["tasks"]) == {"r1_t2b"}
         assert [e["task_id"] for e in out["episodes"]] == ["t1", "t2", "r1_t2b"]
-        assert any("结算 2 条记录，保留 0 个已完成" in l for l in out["trace"])
+        s = out["execution_summary"]
+        assert (s["completed"], s["failed"], s["total"]) == (["t1", "r1_t2b"], ["t2"], 3)
 
     def test_referenced_done_task_stays_for_its_result(self, registry):
         """新任务用 $from 引用已完成任务时，被引用者必须还在图里，派发前要取值。"""
@@ -643,49 +609,9 @@ class TestWorkingMemoryIsPruned:
         assert set(out["tasks"]) == {"t1", "r1_t3"}
         assert out["tasks"]["r1_t3"]["result"] == "A|B"
 
-    def test_ancestors_of_referenced_tasks_stay_too(self, registry):
-        """依赖是传递的：留下 t2 就得留下 t2 的上游，否则图校验会报依赖缺失。"""
-        out = run(registry, "汇总", llm_for(
-            plan(task("t1", "echo", text="A"),
-                 task("t2", "join", left={REF: "t1"}, right="B"),
-                 task("t3", "join", ["t2"], left="只给了一个参数")),
-            replan=plan(task("t4", "echo", text={REF: "t2"}))))
-        assert out["failure"] is None
-        assert set(out["tasks"]) == {"t1", "t2", "r1_t4"}
-        assert out["tasks"]["r1_t4"]["result"] == "A|B"
 
-    def test_superseded_pending_tasks_are_dropped(self, registry):
-        """尚未执行、被新计划取代的任务不进历史 —— 它们没有发生过。"""
-        out = run(registry, "订餐", llm_for(
-            plan(task("t1", "system.book_restaurant", name="小馆 A"),
-                 task("t2", "system.create_event", ["t1"], title="晚餐", when="19:00")),
-            replan=plan(task("t1b", "system.book_restaurant", name="小馆 B"))))
-        assert out["failure"] is None
-        assert [e["task_id"] for e in out["episodes"]] == ["t1", "r1_t1b"]
-
-    def test_cascaded_failures_are_settled_at_finalize(self, registry):
-        """中止路径上被级联标记失败的任务没经过 Evaluator，收尾时仍要进入历史。"""
-        s = initial_state("订餐")
-        s["tasks"] = {"t1": new_task("t1", "订餐", "system.book_restaurant", {"name": "A"}),
-                      "t2": new_task("t2", "建日程", "system.create_event", {}, ["t1"])}
-        s["tasks"]["t1"]["status"], s["tasks"]["t1"]["error"] = TaskStatus.FAILED, "MC-4002"
-        s["failure"] = "MC-4002"
-        out = finalizer(s, Deps(llm=FakeLLM([final("未完成")]), registry=registry))
-        assert out["execution_summary"]["failed"] == ["t1", "t2"]
-        codes = {e["task_id"]: e["error"] for e in out["episodes"]}
-        assert codes["t2"] == ErrorCode.AG_DEPENDENCY_UNRESOLVED.value
-
-    def test_summary_survives_pruning(self, registry):
-        """执行概况从情景记忆与任务图合并得出，清理不影响用户看到的结果。"""
-        out = run(registry, "订餐", llm_for(
-            plan(task("t1", "system.query_calendar", when="今晚"),
-                 task("t2", "system.book_restaurant", ["t1"], name="小馆 A")),
-            replan=plan(task("t2b", "system.book_restaurant", name="小馆 B"))))
-        s = out["execution_summary"]
-        assert s["completed"] == ["t1", "r1_t2b"]
-        assert s["failed"] == ["t2"]
-        assert "t1" in s["results"]
-        assert s["total"] == 3
+class TestFailureIsClearedOnlyByRecovery:
+    """failure 的规则：成功的重规划清除它，单个任务成功不清除。"""
 
     def test_failed_replan_is_not_masked_by_later_successes(self, registry):
         """重规划失败后，剩余任务照常执行；它们成功不代表恢复发生了。"""
@@ -696,6 +622,27 @@ class TestWorkingMemoryIsPruned:
             replan=plan(task("t4", "echo", ["nope"], text="C"))))    # 依赖不存在
         assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
         assert "t2" in out["execution_summary"]["completed"]
+
+    def test_later_successful_replan_clears_an_earlier_failed_one(self, registry):
+        """第二次重规划看到了全部失败记录并覆盖了剩余工作，恢复发生了。"""
+        replans = [plan(task("t4", "echo", ["nope"], text="C")),      # 第一次：依赖不存在
+                   plan(task("t5", "echo", text="D"))]               # 第二次：合法
+        first = plan(task("t1", "echo", text="A"),
+                     task("t2", "join", left="只给了一个参数"),
+                     task("t3", "join", ["t1"], left="也只给了一个参数"))
+
+        def responder(msgs):
+            role = msgs[0].content
+            if "重规划器" in role:
+                return replans.pop(0)
+            if "规划器" in role:
+                return first
+            return final()
+
+        out = run(registry, "汇总", FakeLLM(responder=responder))
+        assert out["replan_count"] == 2
+        assert out["failure"] is None
+        assert "r2_t5" in out["execution_summary"]["completed"]
 
 
 # ============================================================
@@ -745,7 +692,8 @@ class TestGoalAnchor:
 
 class TestSpinningIsDetected:
     def test_identical_replan_is_not_executed(self, registry):
-        """把失败过的调用原样再拆一遍，执行只会得到同样的失败。"""
+        """把失败过的调用原样再拆一遍，执行只会得到同样的失败。
+        判定规则在 test_ledger.py；这里证明判定之后确实没有派发。"""
         out = run(registry, "订餐", llm_for(
             plan(task("t1", "system.book_restaurant", name="小馆 A")),
             replan=plan(task("t1_again", "system.book_restaurant", name="小馆 A"))))
@@ -753,23 +701,6 @@ class TestSpinningIsDetected:
         assert out["execution_count"] == 1                    # 重复的那次没有派发
         assert out["tasks"] == {}
         assert out["errors"][-1]["repeated"] == ["r1_t1_again"]
-        assert any("判定无进展" in l for l in out["trace"])
-
-    def test_changed_arguments_are_a_real_retry(self, registry):
-        out = run(registry, "订餐", llm_for(
-            plan(task("t1", "system.book_restaurant", name="小馆 A")),
-            replan=plan(task("t1b", "system.book_restaurant", name="小馆 B"))))
-        assert out["failure"] is None
-        assert out["execution_count"] == 2
-
-    def test_partially_new_plan_is_allowed(self, registry):
-        """换方案的同时保留了某一步：那一步是否再次失败由执行回答，不猜。"""
-        out = run(registry, "订餐", llm_for(
-            plan(task("t1", "system.book_restaurant", name="小馆 A")),
-            replan=plan(task("t1_again", "system.book_restaurant", name="小馆 A"),
-                        task("t2", "system.query_calendar", when="今晚"))))
-        assert not any("判定无进展" in l for l in out["trace"])
-        assert out["execution_count"] >= 3                    # 新计划被派发了
 
 
 # ============================================================

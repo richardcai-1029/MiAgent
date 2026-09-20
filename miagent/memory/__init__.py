@@ -8,6 +8,9 @@
 它只记「调了什么、成没成、结果是什么」，供重规划与收尾引用，
 并按规则去重、降级。
 
+这次迁移叫**结算**，由**账本**（ledger）编排：重规划前 settle、重规划后 accept、
+收尾时 close。节点只调账本，不直接调 episodic 里的单步函数。
+
 **目标锚**（AgentState.anchor）是一次请求里不变的部分：用户目标与首次拆解。
 它在每一轮重规划里都不可裁，使新计划始终有一个「原本要做什么」可以对照。
 
@@ -17,9 +20,9 @@
 ★ 本包是纯 Python：不 import langgraph，不调用模型，没有副作用。
 """
 
-from . import anchor, episodic, session
-from .anchor import Anchor
-from .episodic import Episode
-from .session import Session, Turn
+from . import anchor, episodic, ledger, session
+from ..graph.state import Anchor, Episode, Turn
+from .session import Session
 
-__all__ = ["Anchor", "Episode", "Session", "Turn", "anchor", "episodic", "session"]
+__all__ = ["Anchor", "Episode", "Session", "Turn",
+           "anchor", "episodic", "ledger", "session"]

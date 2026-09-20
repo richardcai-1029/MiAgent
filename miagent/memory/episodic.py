@@ -8,6 +8,9 @@
 去重与降级都发生在**渲染**时，不改动状态：episodes 字段只增不减，
 同一份记录在不同时刻可以渲染成不同详略，规则确定、可穷举测试。
 
+Episode 的类型定义在 graph.state（它是 State 的元素）；本模块是它的行为。
+节点不直接调用这里的函数 —— 结算的步骤由 ledger 编排，这里是账本的内部接缝。
+
 ★ 本模块是纯函数：不依赖 LangGraph、不调用模型、没有副作用。
 """
 
@@ -15,21 +18,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, TypedDict
+from typing import Any
 
 from ..graph import dag
-from ..graph.state import Task, TaskStatus
+from ..graph.state import Episode, Task, TaskStatus
 
-
-class Episode(TypedDict):
-    task_id: str
-    description: str
-    tool: str
-    args_digest: str        # 参数指纹：同 tool 同指纹即「同一个调用」
-    ok: bool
-    error: str | None       # 失败时的错误码
-    result: str | None      # 成功时的结果原文；失败时是给模型看的失败说明
-    generation: int         # 产生它的那一轮，取当时的 replan_count
+__all__ = ["Episode", "args_digest", "settle", "dedupe", "repeats_failures",
+           "render", "history", "summarize"]
 
 
 def args_digest(arguments: dict[str, Any]) -> str:

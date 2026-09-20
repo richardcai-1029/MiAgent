@@ -86,19 +86,48 @@ class TaskOutcome(TypedDict):
     attempt: int
 
 
+class Episode(TypedDict):
+    """情景记忆的一条记录：离开任务图的终态任务的压缩形式。
+    只保留重规划与收尾用得到的部分；行为见 miagent.memory.episodic。"""
+
+    task_id: str
+    description: str
+    tool: str
+    args_digest: str        # 参数指纹：同 tool 同指纹即「同一个调用」
+    ok: bool
+    error: str | None       # 失败时的错误码
+    result: str | None      # 成功时的结果原文；失败时是给模型看的失败说明
+    generation: int         # 产生它的那一轮，取当时的 replan_count
+
+
+class Anchor(TypedDict):
+    """目标锚：一次请求里不变的部分。行为见 miagent.memory.anchor。"""
+
+    goal: str               # 用户目标原文
+    intent: list[str]       # 首次拆解的各步描述，按任务 id 排序
+
+
+class Turn(TypedDict):
+    """对话的一轮。由 Session 记录并在下一轮填入 history，见 miagent.memory.session。"""
+
+    request: str
+    answer: str
+    summary: str                # 收尾产出的本轮摘要，下一轮规划看的就是它
+    failure: str | None         # 非空表示这一轮没完成，值为错误码
+    episodes: list[Episode]     # 这一轮的执行历史，供调用方查看，不进提示词
+
+
 class AgentState(TypedDict, total=False):
     # ---------- 输入 ----------
     user_request: str
     # 对话历史：之前各轮的记录，由 Session 在 run 时填入，见 miagent.memory.session。
-    # 元素类型是 memory.Turn；这里不引用它，state 不依赖 memory。
-    history: list[dict[str, Any]]
+    history: list[Turn]
 
     # ---------- 任务图：唯一事实来源 ----------
     tasks: dict[str, Task]
 
     # 目标锚：首次规划成功后写入，此后只读，见 miagent.memory.anchor。
-    # 元素类型是 memory.Anchor；这里不引用它，state 不依赖 memory。
-    anchor: dict[str, Any]
+    anchor: Anchor
 
     # ---------- 本轮调度 ----------
     # 列表而非单个：同一轮里彼此无依赖的任务会被一起派发。
@@ -110,8 +139,8 @@ class AgentState(TypedDict, total=False):
     errors: Annotated[list[dict[str, Any]], operator.add]
     trace: Annotated[list[str], operator.add]
     # 情景记忆：离开任务图的终态任务压缩后的记录，见 miagent.memory。
-    # 元素类型是 memory.Episode；这里不引用它，state 不依赖 memory。
-    episodes: Annotated[list[dict[str, Any]], operator.add]
+    # 只增不改：Replanner 与 Finalizer 经账本结算后写回新增的部分。
+    episodes: Annotated[list[Episode], operator.add]
 
     # ---------- 循环控制 ----------
     verdict: Verdict | None
@@ -124,7 +153,11 @@ class AgentState(TypedDict, total=False):
     execution_summary: dict[str, Any]
     final_answer: str
     turn_summary: str           # 本轮摘要，供下一轮规划参考
-    failure: str | None         # 非空表示任务未完成，值为错误码
+    # 非空表示任务未完成，值为错误码。
+    # 清除规则只有一条：成功的重规划清除它（新计划按构造覆盖了全部失败记录），
+    # 单个任务成功不清除 —— 重规划失败后剩余任务照常执行，它们成功不代表恢复发生了。
+    # 重规划侧的取值由 miagent.memory.ledger 给出；其余节点只在中止时写入。
+    failure: str | None
 
 
 def new_task(

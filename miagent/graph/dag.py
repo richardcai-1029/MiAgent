@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..protocol import AgentError, ErrorCode
 from .state import Task, TaskStatus
@@ -100,10 +99,6 @@ def failed_tasks(tasks: Tasks) -> list[str]:
 
 def pending_tasks(tasks: Tasks) -> list[str]:
     return by_status(tasks, TaskStatus.PENDING, TaskStatus.READY)
-
-
-def tool_results(tasks: Tasks) -> dict[str, str]:
-    return {tid: t["result"] for tid, t in tasks.items() if t["result"] is not None}
 
 
 def ancestors(tasks: Tasks, roots: set[str]) -> set[str]:
@@ -211,15 +206,3 @@ def parallel_layers(tasks: Tasks) -> list[list[str]]:
         done |= set(layer)
         remaining = {t: d for t, d in remaining.items() if t not in done}
     return layers
-
-
-def summary(tasks: Tasks) -> dict[str, Any]:
-    """执行概况，供 Finalizer 与调用方使用。"""
-    return {
-        "total": len(tasks),
-        "completed": completed_tasks(tasks),
-        "failed": failed_tasks(tasks),
-        "pending": pending_tasks(tasks),
-        "results": tool_results(tasks),
-        "parallel_layers": parallel_layers(tasks),
-    }

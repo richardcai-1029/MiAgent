@@ -71,8 +71,8 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 | D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `graph/schema.py`、`llm/base.py::complete_structured` | L0 |
 | D-6 | 无对话上下文：图的一次 invoke 处理一个请求，第二个请求承接第一个时规划器一无所知 | `memory.Session` 持有历次轮次（请求、回答、本轮摘要、错误码、执行记录），run 时填入 `history`；Planner 渲染为每轮一段，越旧越先削减——上一轮先降为只剩结论，更早的整段丢弃，且在工具描述之前被削；进程内保留，不落盘 | `miagent/memory/session.py`、`nodes.planner`；`test_session.py` 13 条 | L0 |
 | D-9 | 收尾只产出自由文本回答：格式无约束，且没有可供下一轮引用的本轮记录，多轮之间要么重传全部历史、要么什么都不传 | 收尾改为 schema 驱动的 `FinalOutput(answer, summary)`，一次调用同时给出回答与本轮摘要；预算为 schema 预留位置；自修复失败或窗口放不下时两者一并退回确定性摘要 | `graph/schema.py::FinalOutput`、`nodes.finalizer`；`test_graph.py::TestFinalizerStructuredOutput` | L0 |
-| D-8 | 重规划无目标锚：几轮之后提示词里全是局部的成败记录，新计划可偏离原始目标且不可检测；把失败过的调用原样再拆一遍也照常执行 | 首次规划成功后写入目标锚（用户目标 + 首次拆解各步描述），每轮重规划放最前且不可裁；新任务的 (工具, 参数指纹) 全部在失败记录里时判无进展 AG-1003，不派发 | `miagent/memory/anchor.py`、`episodic.repeats_failures`、`nodes.planner` / `replanner`；`test_graph.py::TestGoalAnchor` / `TestSpinningIsDetected` | L0 |
-| D-7 | 执行上下文只增不减：终态任务全部留在任务图里，每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口 | 任务图只装还要调度的任务。终态任务在重规划时结算为 Episode 进入情景记忆，只有新任务引用到的已完成任务（连同其上游）留在图里；情景记忆渲染时按 (工具, 参数指纹) 去重、按轮次降级——本轮带结果原文，更早的只剩 id 与描述；执行概况由两者合并得出 | `miagent/memory/episodic.py`、`dag.ancestors`、`nodes.replanner`；`test_memory.py` 27 条、`test_graph.py::TestWorkingMemoryIsPruned` | L0 |
+| D-8 | 重规划无目标锚：几轮之后提示词里全是局部的成败记录，新计划可偏离原始目标且不可检测；把失败过的调用原样再拆一遍也照常执行 | 首次规划成功后写入目标锚（用户目标 + 首次拆解各步描述），每轮重规划放最前且不可裁；新任务的 (工具, 参数指纹) 全部在失败记录里时判无进展 AG-1003，不派发 | `miagent/memory/anchor.py`、`ledger.accept`（内部用 `episodic.repeats_failures`）、`nodes.planner` / `replanner`；`test_graph.py::TestGoalAnchor`、`test_ledger.py::TestAcceptDetectsSpinning` | L0 |
+| D-7 | 执行上下文只增不减：终态任务全部留在任务图里，每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口 | 任务图只装还要调度的任务。终态任务在重规划时结算为 Episode 进入情景记忆，只有新任务引用到的已完成任务（连同其上游）留在图里；情景记忆渲染时按 (工具, 参数指纹) 去重、按轮次降级——本轮带结果原文，更早的只剩 id 与描述；执行概况由两者合并得出 | `miagent/memory/ledger.py`（结算的编排：settle / accept / close）、`episodic.py`、`dag.ancestors`、`nodes.replanner` / `finalizer`；`test_ledger.py` 23 条、`test_memory.py`、`test_graph.py::TestWorkingMemoryIsPruned` | L0 |
 
 ### E · 依赖裁剪与轻量化
 
@@ -252,7 +252,7 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 
 ## 四、验证方式
 
-规约与改造的全部约定均以测试代码固化，当前累计 354 条用例。
+规约与改造的全部约定均以测试代码固化，当前累计 367 条用例。
 
 | 验证项 | 方式 |
 |---|---|
