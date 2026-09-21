@@ -23,7 +23,7 @@ from ..llm import system, user
 from ..llm.context import Section, fit
 from ..memory import anchor as anchor_mod, ledger
 from ..memory.session import render_history
-from ..protocol import AgentError, ErrorCode, RetryPolicy
+from ..protocol import AgentError, ErrorCode, RetryPolicy, describe
 from ..tools import ToolRegistry, ToolSource
 from . import dag, dataflow
 from .nodes_meta import Deps
@@ -432,8 +432,10 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
     detail = "\n".join(c.history) or "  （未执行任何任务）"
 
     if state.get("failure"):
-        ask = (f"任务未能完成（错误码 {state['failure']}）。回答请说明做到了哪一步、"
-               f"卡在哪里、建议用户怎么办。")
+        # 带上错误码的中文说明：模型只看到 AG-1001 这样的码时会自行猜测原因
+        # （实测编出「请检查网络」），说明来自协议层的同一张表，不另写一份。
+        ask = (f"任务未能完成，原因：{_failure_text(state['failure'])}。"
+               f"回答请说明做到了哪一步、卡在哪里、建议用户怎么办；不要编造上述以外的原因。")
     else:
         ask = "请根据执行结果回答用户。"
     # 摘要是下一轮规划器唯一能看到的上文：要带具体结论（时间、数值、结果），
@@ -477,5 +479,10 @@ def _summary_answer(state: AgentState, summary: dict[str, Any]) -> str:
     done, failed = len(summary["completed"]), len(summary["failed"])
     head = f"已完成 {done} 项、失败 {failed} 项。"
     if state.get("failure"):
-        return head + f"任务未能完成，错误码 {state['failure']}。"
+        return head + f"任务未能完成：{_failure_text(state['failure'])}。"
     return head
+
+
+def _failure_text(code: str) -> str:
+    """错误码连同它的中文说明，如「AG-1001（模型输出无法解析为可执行计划）」。"""
+    return f"{code}（{describe(ErrorCode(code))}）"

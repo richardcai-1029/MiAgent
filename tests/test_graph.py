@@ -739,6 +739,24 @@ class TestFinalizerStructuredOutput:
         state["tasks"] = {"t1": t}
         return state
 
+    def test_failure_prompt_carries_the_codes_meaning(self, registry):
+        """模型只看到错误码会自行猜原因；说明来自协议层的错误码表。"""
+        state = self._state()
+        state["failure"] = ErrorCode.AG_PLAN_PARSE_FAILED.value
+        llm = FakeLLM([final()])
+        finalizer(state, Deps(llm=llm, registry=registry))
+        body = llm.seen[-1][1].content
+        assert "AG-1001（模型输出无法解析为可执行计划）" in body
+        assert "不要编造" in body
+
+    def test_deterministic_fallback_also_explains_the_code(self, registry):
+        """窗口放不下时的兜底回答同样带说明，用户不该拿到一个裸码。"""
+        state = self._state()
+        state["failure"] = ErrorCode.AG_PLAN_PARSE_FAILED.value
+        llm = FakeLLM(script=[], context_limit=10)      # 必超窗 -> 走兜底
+        out = finalizer(state, Deps(llm=llm, registry=registry))
+        assert "AG-1001（模型输出无法解析为可执行计划）" in out["final_answer"]
+
     def test_answer_and_summary_come_from_one_call(self, registry):
         llm = FakeLLM([final("电量 63%", "查过电量，63%")])
         out = finalizer(self._state(), Deps(llm=llm, registry=registry))
