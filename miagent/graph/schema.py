@@ -13,7 +13,26 @@ from __future__ import annotations
 
 from typing import Any, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
+
+from . import dataflow
+
+_ARGUMENTS_DESCRIPTION = ('工具参数。要用到上游任务的结果时，把该参数的值写成 '
+                          '{"$from": "上游任务 id"}，该引用会自动产生依赖关系')
+
+
+def _reject_stringified_references(arguments: dict[str, Any]) -> dict[str, Any]:
+    """引用写成字符串的计划在校验阶段即被拒，错误原因会喂回给模型自修复。
+
+    放在 schema 校验而不是 dag.validate：这一层的失败会触发自修复重试，
+    模型有一次改正的机会；到了结构校验就只能整份计划作废。
+    """
+    bad = dataflow.stringified_references(arguments)
+    if bad:
+        raise ValueError(
+            f"参数 {'、'.join(bad)} 的引用写成了字符串，"
+            f'应写成 JSON 对象 {{"{dataflow.REFERENCE_KEY}": "任务 id"}}')
+    return arguments
 
 
 class TaskSpec(BaseModel):
@@ -28,8 +47,9 @@ class TaskSpec(BaseModel):
         default_factory=list,
         description="必须先完成的任务 id 列表；没有依赖则为空数组")
     required_tool: str = Field(description="要调用的工具名")
-    arguments: dict[str, Any] = Field(default_factory=dict,
-                                      description='工具参数。要用到上游任务的结果时，把该参数的值写成 {"$from": "上游任务 id"}，该引用会自动产生依赖关系')
+    arguments: dict[str, Any] = Field(default_factory=dict, description=_ARGUMENTS_DESCRIPTION)
+
+    _no_stringified_references = field_validator("arguments")(_reject_stringified_references)
 
 
 class TaskPlan(BaseModel):
@@ -70,8 +90,9 @@ def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
         dependencies=(list[str], Field(default_factory=list,
                                        description="必须先完成的任务 id 列表")),
         required_tool=(tool_field, Field(description="工具名，必须是列出的之一")),
-        arguments=(dict[str, Any], Field(default_factory=dict,
-                                         description='工具参数。要用到上游任务的结果时，把该参数的值写成 {"$from": "上游任务 id"}，该引用会自动产生依赖关系')),
+        arguments=(dict[str, Any], Field(default_factory=dict, description=_ARGUMENTS_DESCRIPTION)),
+        __validators__={"_no_stringified_references":
+                        field_validator("arguments")(_reject_stringified_references)},
     )
     return create_model(
         "TaskPlanConstrained",

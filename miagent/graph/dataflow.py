@@ -49,6 +49,27 @@ def as_reference(value: Any) -> str | None:
     return None
 
 
+def stringified_references(arguments: Any, _path: str = "") -> list[str]:
+    """找出 arguments 里写成了**字符串**的引用，返回它们的参数路径。
+
+    小模型看到工具 schema 里参数是 string 类型，会把引用对象序列化后塞进去：
+    `"name": "{\"$from\": \"task_1\"}"`。它不是引用（as_reference 不认字符串），
+    不会派生依赖，也不会被 resolve —— 这串文本会原样传给工具，且「执行成功」。
+
+    判定只看字符串里是否出现 $from：合法的工具参数没有理由包含这个保留字，
+    而模型写出的变体（单引号、少引号、多空格）不值得逐一去解析。
+    """
+    if isinstance(arguments, str):
+        return [_path] if REFERENCE_KEY in arguments else []
+    if isinstance(arguments, dict):
+        return [p for k, v in arguments.items()
+                for p in stringified_references(v, f"{_path}.{k}" if _path else k)]
+    if isinstance(arguments, list):
+        return [p for i, v in enumerate(arguments)
+                for p in stringified_references(v, f"{_path}[{i}]")]
+    return []
+
+
 def referenced_ids(arguments: Any) -> set[str]:
     """找出 arguments 里引用到的全部任务 id（递归，含嵌套的对象与数组）。"""
     ref = as_reference(arguments)

@@ -93,6 +93,31 @@ class TestResolve:
         assert e.value.code is ErrorCode.AG_DEPENDENCY_UNRESOLVED
 
 
+class TestStringifiedReferences:
+    """写成字符串的引用不是引用：不派生依赖、不求值，会原样传给工具。
+    必须在校验阶段识别出来。"""
+
+    def test_serialized_reference_is_found_with_its_path(self):
+        assert dataflow.stringified_references({"name": '{"$from": "t1"}'}) == ["name"]
+
+    @pytest.mark.parametrize("value", [
+        "{'$from': 't1'}",          # 单引号
+        "{$from: t1}",              # 少引号
+        "  {\"$from\":\"t1\"} ",  # 多空格
+        "$from t1",                 # 只剩保留字
+    ])
+    def test_malformed_variants_are_all_caught(self, value):
+        assert dataflow.stringified_references({"x": value}) == ["x"]
+
+    def test_nested_paths(self):
+        args = {"a": {"b": '{"$from": "t1"}'}, "c": ["ok", '{"$from": "t2"}']}
+        assert dataflow.stringified_references(args) == ["a.b", "c[1]"]
+
+    def test_real_references_and_plain_values_pass(self):
+        args = {"a": {REF: "t1"}, "b": "今晚 19:30", "c": 3, "d": None, "e": [{REF: "t2"}]}
+        assert dataflow.stringified_references(args) == []
+
+
 class TestReferenceImpliesDependency:
     """引用即依赖：先后关系由引用派生，不指望模型再声明一遍。"""
 

@@ -293,6 +293,29 @@ class TestEndToEnd:
         assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert out["execution_count"] == 0
 
+    def test_stringified_reference_is_repaired_before_execution(self, registry):
+        """引用写成字符串 → schema 校验拒绝 → 错误喂回模型 → 改成对象后执行。
+        乱码参数一次都不能传给工具。"""
+        outs = iter([
+            plan(task("a", "system.query_calendar", when="今晚"),
+                 task("b", "system.create_event", title="晚餐", when='{"$from": "a"}')),
+            plan(task("a", "system.query_calendar", when="今晚"),
+                 task("b", "system.create_event", title="晚餐", when={"$from": "a"})),
+        ])
+        llm = FakeLLM(responder=lambda m: next(outs) if "规划器" in m[0].content else final())
+        out = run(registry, "安排晚餐", llm)
+        assert out["failure"] is None
+        assert llm.repair_count == 1
+        assert "写成了字符串" in llm.seen[1][-1].content        # 修复提示说明了错在哪
+        assert out["tasks"]["b"]["dependencies"] == ["a"]      # 改成对象后依赖被派生
+        assert out["tasks"]["b"]["result"] == "已创建日程「晚餐」于 今晚 19:00-22:00 空闲"
+
+    def test_stringified_reference_unrepaired_fails_planning(self, registry):
+        out = run(registry, "安排晚餐", llm_for(plan(
+            task("b", "system.create_event", title="晚餐", when='{"$from": "nope"}'))))
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
+        assert out["execution_count"] == 0
+
     def test_transient_failure_retries_same_task(self, registry):
         """MC-1003 → 段位 1 → 重试同一个任务，不重规划。"""
         from miagent.mock_server.tools import reset_flaky
