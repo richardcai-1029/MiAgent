@@ -180,3 +180,119 @@ class TestDirtyOutputCleaning:
     def test_unparseable_text_is_returned_as_is(self):
         """原文要连同错误一起喂回给模型，截过的文本会让它看不出错在哪。"""
         assert self._extract("完全不是 JSON") == "完全不是 JSON"
+
+
+class TestOpenAICompatible:
+    """云端实现：不联网，注入假 client 验证请求形态与流式拼接。"""
+
+    class _Client:
+        """最小假 openai client，记录收到的请求参数，按 stream 返回不同形态。"""
+
+        def __init__(self, text="hi", chunks=None):
+            self.text, self.chunks, self.calls = text, chunks, []
+            self.chat = self
+            self.completions = self
+
+        def create(self, **kw):
+            from types import SimpleNamespace as NS
+            self.calls.append(kw)
+            if kw.get("stream"):
+                pieces = [NS(choices=[NS(delta=NS(content=c))]) for c in self.chunks]
+                pieces.append(NS(choices=[]))          # include_usage 时的收尾 chunk
+                return iter(pieces)
+            return NS(choices=[NS(message=NS(content=self.text))])
+
+    def _llm(self, **kw):
+        from miagent.llm.openai_compatible import OpenAICompatibleLLM
+        return OpenAICompatibleLLM(model="m", base_url="http://x", api_key="k", **kw)
+
+    def test_non_stream_returns_message_content(self):
+        llm = self._llm()
+        llm._client = self._Client(text="答")
+        assert llm.complete([user("q")]).content == "答"
+        assert "stream" not in llm._client.calls[0]
+
+    def test_stream_joins_deltas_and_skips_usage_chunk(self):
+        llm = self._llm(stream=True)
+        llm._client = self._Client(chunks=["你", "好", None, "！"])
+        assert llm.complete([user("q")]).content == "你好！"
+        assert llm._client.calls[0]["stream"] is True
+
+    def test_extra_body_is_passed_through(self):
+        llm = self._llm(extra_body={"modalities": ["text"]})
+        llm._client = self._Client()
+        llm.complete([user("q")])
+        assert llm._client.calls[0]["extra_body"] == {"modalities": ["text"]}
+
+    def test_native_structured_uses_response_format(self):
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = self._llm()
+        llm._client = self._Client(text='{"tasks":[]}')
+        llm.complete_structured([user("t")], Plan)
+        assert llm._client.calls[0]["response_format"]["type"] == "json_schema"
+
+    def test_non_native_structured_falls_back_to_prompt_schema(self):
+        """关掉原生模式后：不带 response_format，schema 由基类注入 prompt。"""
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = self._llm(native_structured_output=False)
+        llm._client = self._Client(text='{"tasks":[]}')
+        llm.complete_structured([user("t")], Plan)
+        call = llm._client.calls[0]
+        assert "response_format" not in call
+        assert "JSON Schema" in call["messages"][-1]["content"]
+
+    def test_sdk_errors_become_ag_5001(self):
+        class Boom(self._Client):
+            def create(self, **kw):
+                raise ConnectionError("refused")
+        llm = self._llm()
+        llm._client = Boom()
+        with pytest.raises(AgentError) as ei:
+            llm.complete([user("q")])
+        assert ei.value.code is ErrorCode.AG_LLM_UNAVAILABLE
+        assert ei.value.detail["cause"] == "ConnectionError"
+
+
+class TestQwen:
+    """Qwen 预设：只检查开关是否按 DashScope 的要求预置，不发请求。"""
+
+    def test_omni_presets(self):
+        from miagent.llm.qwen import QwenLLM
+        llm = QwenLLM(api_key="k")
+        assert llm.name == "qwen2.5-omni-7b"
+        assert llm._stream is True
+        assert llm.supports_native_structured_output is False
+        assert llm._extra_body == {"modalities": ["text"]}
+
+    def test_non_omni_model_has_no_modalities(self):
+        from miagent.llm.qwen import QwenLLM
+        assert QwenLLM(model="qwen-plus", api_key="k")._extra_body == {}
+
+    def test_api_key_from_env(self, monkeypatch):
+        from miagent.llm.qwen import QwenLLM
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "from-env")
+        assert QwenLLM()._api_key == "from-env"
+
+    def test_api_key_from_dotenv(self, monkeypatch, tmp_path):
+        """环境变量没设时，退回读当前目录的 .env；注释、引号、export 前缀都要能处理。"""
+        from miagent.llm.qwen import QwenLLM
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            "# 注释\nOTHER=1\nexport DASHSCOPE_API_KEY='from-dotenv'\n", encoding="utf-8")
+        assert QwenLLM()._api_key == "from-dotenv"
+
+    def test_env_var_beats_dotenv(self, monkeypatch, tmp_path):
+        from miagent.llm.qwen import QwenLLM
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "from-env")
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=from-dotenv\n", encoding="utf-8")
+        assert QwenLLM()._api_key == "from-env"
+
+    def test_missing_api_key_raises_ag_5001(self, monkeypatch, tmp_path):
+        from miagent.llm.qwen import QwenLLM
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)                 # 没有 .env 的目录
+        with pytest.raises(AgentError) as ei:
+            QwenLLM()
+        assert ei.value.code is ErrorCode.AG_LLM_UNAVAILABLE

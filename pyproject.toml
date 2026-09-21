@@ -15,6 +15,9 @@ dependencies = [
 # 它们写在框架文档里而非类型签名里，跨大版本变更后会静默失效而非报错
 # （见 tests/test_framework_contract.py 与适配改造清单的风险分级）。
 graph = ["langgraph>=1.2,<2.0"]
+# 云端模型（Qwen / MiMo 云端等 OpenAI 兼容接口）。同样单独拆出：
+# 端侧只用 FakeLLM 或本地模型时，不该把 openai 及其 HTTP 依赖栈装进来。
+cloud = ["openai>=1.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "psutil>=5.9", "grandalf>=0.8"]
 
 [build-system]
