@@ -47,7 +47,7 @@ class FinalOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     answer: str = Field(description="给用户的回答。简洁，只说结论，不复述过程")
-    summary: str = Field(description="本轮摘要：做了什么、结论是什么。"
+    summary: str = Field(description="本轮摘要：具体结论是什么（含时间、数值等要点），"
                                      "供下一轮规划参考，一两句话")
 
 
