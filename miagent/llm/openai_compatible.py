@@ -103,7 +103,7 @@ class OpenAICompatibleLLM(LLM):
     def _complete_structured(self, messages: list[LLMMessage], schema: type[T]) -> str:
         """服务端支持时用 JSON Schema 模式保证格式；否则退回基类的校验 + 自修复。"""
         if not self.supports_native_structured_output:
-            return self.complete(messages).content
+            return super()._complete_structured(messages, schema)
         return self._request(messages, response_format={
             "type": "json_schema",
             "json_schema": {"name": schema.__name__, "strict": True,

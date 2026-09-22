@@ -296,3 +296,39 @@ class TestQwen:
         with pytest.raises(AgentError) as ei:
             QwenLLM()
         assert ei.value.code is ErrorCode.AG_LLM_UNAVAILABLE
+
+
+class TestStructuredGoesThroughGuard:
+    """结构化补全与普通补全共用同一段检查与计数，原生路径也不例外。"""
+
+    def _native(self, text='{"tasks":[]}', **kw):
+        from miagent.llm.openai_compatible import OpenAICompatibleLLM
+        llm = OpenAICompatibleLLM(model="m", base_url="http://x", api_key="k", **kw)
+        llm._client = TestOpenAICompatible._Client(text=text)
+        return llm
+
+    def test_native_structured_is_counted(self):
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = self._native()
+        llm.complete_structured([user("t")], Plan)
+        assert llm.stats()["calls"] == 1
+
+    def test_non_native_structured_is_counted_once(self):
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = self._native(native_structured_output=False)
+        llm.complete_structured([user("t")], Plan)
+        assert llm.stats()["calls"] == 1
+
+    def test_native_structured_respects_context_limit(self):
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = self._native(context_limit=10)
+        with pytest.raises(AgentError) as ei:
+            llm.complete_structured([user("x" * 11)], Plan)
+        assert ei.value.code is ErrorCode.AG_CONTEXT_OVERFLOW
+        assert llm._client.calls == []            # 没发出去
+
+    def test_repair_round_is_a_second_call(self):
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = FakeLLM(["not json", '{"tasks":[]}'])
+        llm.complete_structured([user("t")], Plan)
+        assert llm.stats() == {**llm.stats(), "calls": 2, "repairs": 1}

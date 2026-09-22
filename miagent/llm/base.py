@@ -18,7 +18,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal, TypeVar
+from typing import Callable, Literal, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -169,6 +169,14 @@ class LLM(ABC):
         return len(text)
 
     def complete(self, messages: list[LLMMessage]) -> LLMResponse:
+        return self._guarded(messages, lambda: self._complete(messages))
+
+    def _guarded(self, messages: list[LLMMessage], call: Callable[[], str]) -> LLMResponse:
+        """所有实现共通的事都在这里：上下文长度检查、计时、统计。
+
+        普通补全与结构化补全都经过这一层，子类钩子（_complete /
+        _complete_structured）无论内部怎么发请求，都不可能绕开检查与计数。
+        """
         prompt_chars = sum(self.estimate(m.content) for m in messages)
         if prompt_chars > self.context_limit:
             # 端侧窗口小，宁可在发出前拦住，也不要让模型截断输入后
@@ -180,7 +188,7 @@ class LLM(ABC):
             )
 
         started = time.perf_counter()
-        content = self._complete(messages)
+        content = call()
         elapsed = (time.perf_counter() - started) * 1000
 
         self.call_count += 1
@@ -215,7 +223,7 @@ class LLM(ABC):
 
         last_error = ""
         for attempt in range(max_repairs + 1):
-            raw = self._complete_structured(convo, schema)
+            raw = self._guarded(convo, lambda: self._complete_structured(convo, schema)).content
             try:
                 return schema.model_validate_json(extract_json(raw))
             except (ValidationError, ValueError) as e:
@@ -236,8 +244,11 @@ class LLM(ABC):
         raise AssertionError("unreachable")
 
     def _complete_structured(self, messages: list[LLMMessage], schema: type[T]) -> str:
-        """默认走普通补全。原生支持结构化输出的实现应覆写此方法。"""
-        return self.complete(messages).content
+        """默认走普通补全。原生支持结构化输出的实现应覆写此方法。
+
+        调 _complete 而非 complete：检查与计数已由 complete_structured 做过。
+        """
+        return self._complete(messages)
 
     @abstractmethod
     def _complete(self, messages: list[LLMMessage]) -> str:
