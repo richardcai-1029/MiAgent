@@ -298,6 +298,44 @@ class TestQwen:
         assert ei.value.code is ErrorCode.AG_LLM_UNAVAILABLE
 
 
+class TestOllama:
+    """Ollama 预设：只检查思考开关的注入形态，不发请求。"""
+
+    def _llm(self, **kw):
+        from miagent.llm.ollama import OllamaLLM
+        llm = OllamaLLM(**kw)
+        llm._client = TestOpenAICompatible._Client(text='{"tasks":[]}')
+        return llm
+
+    def test_presets(self):
+        llm = self._llm()
+        assert llm.name == "qwen3-8b:latest"
+        assert llm._api_key == "ollama"
+        assert llm.supports_native_structured_output is True
+
+    def test_no_think_is_appended_as_trailing_system(self):
+        llm = self._llm()
+        llm.complete([system("s"), user("q")])
+        sent = llm._client.calls[0]["messages"]
+        assert sent[:2] == [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+        assert sent[-1] == {"role": "system", "content": "/no_think"}
+
+    def test_think_true_sends_messages_untouched(self):
+        llm = self._llm(think=True)
+        llm.complete([user("q")])
+        assert llm._client.calls[0]["messages"] == [{"role": "user", "content": "q"}]
+
+    def test_structured_keeps_native_mode_and_switch(self):
+        """结构化调用仍走 response_format，软开关排在基类注入的 schema 之后。"""
+        from miagent.graph.schema import TaskPlan as Plan
+        llm = self._llm()
+        llm.complete_structured([user("t")], Plan)
+        call = llm._client.calls[0]
+        assert call["response_format"]["type"] == "json_schema"
+        assert call["messages"][-1]["content"] == "/no_think"
+        assert "JSON Schema" in call["messages"][-2]["content"]
+
+
 class TestStructuredGoesThroughGuard:
     """结构化补全与普通补全共用同一段检查与计数，原生路径也不例外。"""
 
