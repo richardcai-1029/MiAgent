@@ -35,3 +35,8 @@ class Deps:
 
     # 等待的实现可注入，使退避行为能在测试中被观察，不必真的等。
     sleep: Callable[[float], None] = field(default=time.sleep)
+
+    # 是否做语义校验（工具结果是否达成任务、整轮目标是否达成）。
+    # 关掉则两个校验节点直接透传：判定只会收紧结论，缺席等于回到
+    # 只按错误码判定的行为，不会把失败误判为成功。
+    verify: bool = True

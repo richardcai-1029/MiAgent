@@ -128,10 +128,12 @@ class TestAcceptDetectsSpinning:
                                          pending("r1_t2", tool="calendar", when="今晚")))
         assert set(a.tasks) == {"r1_t1_again", "r1_t2"} and a.failure is None
 
-    def test_repeating_a_success_is_not_spinning(self):
+    def test_redoing_a_successful_call_is_also_spinning(self):
+        """新任务只是把已经做成的调用再拆一遍：没有进展，且副作用会发生第二次。"""
         s = ledger.settle({"t1": done("t1", tool="book", name="A")}, [], 0)
         a = ledger.accept(s, merged_with(s, pending("r1_t1_again", tool="book", name="A")))
-        assert a.failure is None
+        assert a.failure == ErrorCode.AG_PLAN_NO_PROGRESS.value
+        assert a.tasks == {}
 
 
 class TestAcceptDecidesFailure:

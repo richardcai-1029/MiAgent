@@ -1,4 +1,8 @@
-"""进程内多轮会话：上一轮的摘要进入下一轮的规划提示词。"""
+"""进程内多轮会话：上一轮的摘要进入下一轮的规划提示词。
+
+本文件按序脚本回复，断言的是提示词里有什么。语义校验会在脚本中间插入
+与多轮上下文无关的回复，因此这里一律关掉；校验自身见 test_verify.py。
+"""
 
 import json
 
@@ -78,7 +82,7 @@ class TestSessionRecordsTurns:
     def test_each_run_appends_a_turn(self, registry):
         llm = scripted(plan(task("t1", "echo", text="A")), final("好了", "回显了 A"),
                        plan(task("t2", "echo", text="B")), final("也好了", "回显了 B"))
-        session = Session(build_agent(llm, registry))
+        session = Session(build_agent(llm, registry, verify=False))
         session.run("回显 A")
         session.run("回显 B")
         assert [t["request"] for t in session.turns] == ["回显 A", "回显 B"]
@@ -87,7 +91,7 @@ class TestSessionRecordsTurns:
 
     def test_failed_turn_is_recorded_with_its_code(self, registry):
         llm = scripted("我不知道", "还是不知道", final("抱歉", "没能规划"))
-        session = Session(build_agent(llm, registry))
+        session = Session(build_agent(llm, registry, verify=False))
         out = session.run("随便说说")
         assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert session.turns[0]["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
@@ -95,7 +99,7 @@ class TestSessionRecordsTurns:
 
     def test_clear_forgets_everything(self, registry):
         llm = scripted(plan(), final("你好", "打了招呼"), plan(), final("你好", "又打了招呼"))
-        session = Session(build_agent(llm, registry))
+        session = Session(build_agent(llm, registry, verify=False))
         session.run("你好")
         session.clear()
         session.run("再说一次")
@@ -106,14 +110,14 @@ class TestSessionRecordsTurns:
 class TestHistoryReachesThePlanner:
     def test_first_turn_has_no_history(self, registry):
         llm = scripted(plan(), final("你好", "打了招呼"))
-        Session(build_agent(llm, registry)).run("你好")
+        Session(build_agent(llm, registry, verify=False)).run("你好")
         assert "上一轮" not in planner_prompt(llm, "你好")
 
     def test_second_turn_sees_the_previous_summary(self, registry):
         llm = scripted(plan(task("t1", "system.query_calendar", when="今晚")),
                        final("今晚有空", "查过日历，今晚 19 点后有空"),
                        plan(), final("好", "建了日程"))
-        session = Session(build_agent(llm, registry))
+        session = Session(build_agent(llm, registry, verify=False))
         session.run("今晚有空吗")
         session.run("那帮我建个日程")
         prompt = planner_prompt(llm, "那帮我建个日程")
@@ -123,7 +127,7 @@ class TestHistoryReachesThePlanner:
     def test_failed_turn_is_marked_in_history(self, registry):
         llm = scripted("我不知道", "还是不知道", final("抱歉", "没能规划"),
                        plan(), final("好", "这次可以"))
-        session = Session(build_agent(llm, registry))
+        session = Session(build_agent(llm, registry, verify=False))
         session.run("随便说说")
         session.run("再试试")
         assert "上一轮（未完成，AG-1001）" in planner_prompt(llm, "再试试")
@@ -134,7 +138,7 @@ class TestHistoryReachesThePlanner:
                        plan(task("t1", "system.book_restaurant", name="小馆 A")),
                        plan(task("t1b", "system.book_restaurant", name="小馆 B")),
                        final("订好了", "订了小馆 B"))
-        session = Session(build_agent(llm, registry, retry_delay_ms=0))
+        session = Session(build_agent(llm, registry, retry_delay_ms=0, verify=False))
         session.run("你好")
         session.run("订餐")
         replan = next(m[1].content for m in llm.prompts if "重规划器" in m[0].content)

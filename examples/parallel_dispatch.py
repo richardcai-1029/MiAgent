@@ -43,7 +43,8 @@ def llm_for(p, answer="完成"):
 
 def run(title, tasks_json, registry, **kw):
     print(f"\n{'━' * 76}\n{title}\n{'━' * 76}")
-    app = build_agent(llm_for(tasks_json), registry, **kw)
+    # 这里量的是派发方式带来的差异，关掉语义校验以免掺入与派发无关的模型调用
+    app = build_agent(llm_for(tasks_json), registry, verify=False, **kw)
     t = time.perf_counter()
     out = app.invoke(initial_state("读取三个数据源"), {"recursion_limit": 60})
     elapsed = (time.perf_counter() - t) * 1000

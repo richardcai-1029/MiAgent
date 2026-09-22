@@ -13,7 +13,7 @@ from .state import AgentState
 
 
 def route_after_scheduler(state: AgentState) -> str | list[Send]:
-    """Scheduler 之后：没有可派发的任务就收尾，否则并行扇出。
+    """Scheduler 之后：没有可派发的任务就去完成校验，否则并行扇出。
 
     ★ 返回 Send 列表即为并行派发。每个 Send 携带自己的任务，
       Send 的 payload 就是那次节点调用看到的全部 state ——
@@ -24,12 +24,20 @@ def route_after_scheduler(state: AgentState) -> str | list[Send]:
     """
     dispatch = state.get("dispatch") or []
     if not dispatch:
-        return "finalizer"
+        return "goal_verifier"
     return [
         Send("mcp_executor" if item["route"] == "miclaw" else "local_tool",
              {"task": item["task"]})
         for item in dispatch
     ]
+
+
+def route_after_goal_verifier(state: AgentState) -> str:
+    """完成校验之后：判未达成且还能重规划就去补，否则收尾。
+
+    判定写在节点里（见 nodes.verify_goal），这里只翻译 verdict。
+    """
+    return "replanner" if state.get("verdict") == "replan" else "finalizer"
 
 
 def route_after_evaluator(state: AgentState) -> str:

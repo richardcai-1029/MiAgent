@@ -27,6 +27,11 @@ def plan(*tasks):
 def make_llm(first, replan=None, answer="完成。"):
     def responder(msgs):
         role = msgs[0].content
+        # 校验：这里一律判通过，校验本身的演示见 self_check.py
+        if "结果校验器" in role:
+            return json.dumps({"reviews": []}, ensure_ascii=False)
+        if "完成校验器" in role:
+            return json.dumps({"achieved": True, "gap": ""}, ensure_ascii=False)
         if "重规划器" in role:
             return replan or plan()
         if "规划器" in role:

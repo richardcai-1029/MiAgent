@@ -23,7 +23,7 @@ from typing import Any
 from ..graph import dag
 from ..graph.state import Episode, Task, TaskStatus
 
-__all__ = ["Episode", "args_digest", "settle", "dedupe", "repeats_failures",
+__all__ = ["Episode", "args_digest", "settle", "dedupe", "repeats_calls",
            "render", "history", "summarize"]
 
 
@@ -73,12 +73,16 @@ def dedupe(episodes: list[Episode]) -> list[Episode]:
     return [e for i, e in enumerate(episodes) if i in keep]
 
 
-def repeats_failures(new_tasks: dict[str, Task], episodes: list[Episode]) -> bool:
-    """新计划是否只是把失败过的调用原样再拆一遍。
+def repeats_calls(new_tasks: dict[str, Task], episodes: list[Episode]) -> bool:
+    """新计划是否只是把这一轮已经调过的调用原样再拆一遍。
 
-    判据：新任务非空，且每一个的 (tool, 参数指纹) 都能在失败记录里找到。
+    判据：新任务非空，且每一个的 (tool, 参数指纹) 都能在情景记忆里找到。
     只要有一个任务是新的，就不算 —— 模型可能在换方案的同时保留了某一步，
-    那一步是否再次失败由执行去回答，这里不猜。
+    那一步的结果由执行去回答，这里不猜。
+
+    成败都算重复：重做失败过的调用会得到同样的失败，重做成功过的调用
+    只是把已经有结果的事再做一遍，两者都不构成进展，而后者还会让带副作用
+    的系统调用发生第二次。
 
     参数指纹取的是模型写下的原始形式（含 `$from` 引用），因此「同一个引用、
     上游结果却已不同」的情况不会被误判为重复：这种情况下引用指向的 id 本身
@@ -86,8 +90,8 @@ def repeats_failures(new_tasks: dict[str, Task], episodes: list[Episode]) -> boo
     """
     if not new_tasks:
         return False
-    failed = {(e["tool"], e["args_digest"]) for e in episodes if not e["ok"]}
-    return all((t["required_tool"], args_digest(t["arguments"])) in failed
+    called = {(e["tool"], e["args_digest"]) for e in episodes}
+    return all((t["required_tool"], args_digest(t["arguments"])) in called
                for t in new_tasks.values())
 
 

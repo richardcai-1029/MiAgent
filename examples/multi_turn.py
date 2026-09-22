@@ -22,19 +22,31 @@ def final(answer, summary):
     return json.dumps({"answer": answer, "summary": summary}, ensure_ascii=False)
 
 
+def passed():
+    """结果校验：不给判定即全部通过。"""
+    return json.dumps({"reviews": []}, ensure_ascii=False)
+
+
+def achieved():
+    """完成校验：目标已达成。"""
+    return json.dumps({"achieved": True, "gap": ""}, ensure_ascii=False)
+
+
 def main() -> None:
     client = MiClawClient(transport=LoopbackTransport(MiClawMockServer()))
     client.connect("multi-turn-demo", ["calendar.read", "calendar.write"])
     registry = ToolRegistry()
     registry.load_from_miclaw(client)
 
-    # 脚本按顺序回复：每轮一次规划、一次收尾
+    # 脚本按顺序回复：每轮依次是规划、结果校验、完成校验、收尾
     llm = FakeLLM([
         plan({"id": "t1", "description": "查今晚日程", "required_tool": "system.query_calendar",
               "dependencies": [], "arguments": {"when": "今晚"}}),
+        passed(), achieved(),
         final("今晚 19:00 之后有空。", "查过日历，今晚 19:00 之后空闲"),
         plan({"id": "t1", "description": "创建晚餐日程", "required_tool": "system.create_event",
               "dependencies": [], "arguments": {"title": "晚餐", "when": "19:30"}}),
+        passed(), achieved(),
         final("已建好 19:30 的晚餐日程。", "创建了 19:30 的晚餐日程"),
     ])
 

@@ -154,28 +154,28 @@ class TestAnchor:
         assert "（无）" in anchor.render(anchor.build("你好", {})).text
 
 
-class TestRepeatsFailures:
-    def _failed_episodes(self):
+class TestRepeatsCalls:
+    def _episodes(self):
         return episodic.settle({"t1": failed("t1", tool="book", name="A"),
                                 "t2": done("t2", tool="echo", text="x")}, [], 0)
 
     def test_all_new_tasks_are_failed_calls(self):
         new = {"r1_t1": pending("r1_t1", tool="book", name="A")}
-        assert episodic.repeats_failures(new, self._failed_episodes())
+        assert episodic.repeats_calls(new, self._episodes())
 
     def test_a_single_new_call_breaks_the_loop(self):
         new = {"r1_t1": pending("r1_t1", tool="book", name="A"),
                "r1_t3": pending("r1_t3", tool="book", name="B")}
-        assert not episodic.repeats_failures(new, self._failed_episodes())
+        assert not episodic.repeats_calls(new, self._episodes())
 
-    def test_repeating_a_success_is_not_spinning(self):
-        """成功过的调用再做一次不是打转 —— 判据只看失败记录。"""
+    def test_redoing_a_successful_call_is_also_spinning(self):
+        """已经做成的事再做一遍同样不是进展，而且会让副作用发生第二次。"""
         new = {"r1_t2": pending("r1_t2", tool="echo", text="x")}
-        assert not episodic.repeats_failures(new, self._failed_episodes())
+        assert episodic.repeats_calls(new, self._episodes())
 
     def test_different_arguments_are_a_new_attempt(self):
         new = {"r1_t1": pending("r1_t1", tool="book", name="B")}
-        assert not episodic.repeats_failures(new, self._failed_episodes())
+        assert not episodic.repeats_calls(new, self._episodes())
 
     def test_empty_plan_is_not_spinning(self):
-        assert not episodic.repeats_failures({}, self._failed_episodes())
+        assert not episodic.repeats_calls({}, self._episodes())

@@ -9,7 +9,9 @@ from miagent.client import MiClawClient
 from miagent.graph import build_agent, dag, initial_state
 from miagent.graph.nodes import (Deps, evaluator, execute, finalizer,
                                  planner, scheduler, _tools_section)
-from miagent.graph.routers import route_after_evaluator, route_after_scheduler
+from miagent.graph.routers import (route_after_evaluator,
+                                   route_after_goal_verifier,
+                                   route_after_scheduler)
 from langgraph.types import Send
 
 from miagent.graph.state import (MAX_REPLANS, MAX_TOTAL_EXECUTIONS,
@@ -67,9 +69,37 @@ def final(answer="完成", summary="本轮已完成"):
     return json.dumps({"answer": answer, "summary": summary}, ensure_ascii=False)
 
 
-def llm_for(first, replan=None, answer="完成"):
+def reviews(*items):
+    """结果校验的判定。不给判定即全部通过 —— 漏判按通过处理。"""
+    return json.dumps({"reviews": list(items)}, ensure_ascii=False)
+
+
+def reject(task_id, reason="结果与任务不符", corrected=None):
+    return {"task_id": task_id, "passed": False, "reason": reason,
+            "corrected_arguments": corrected}
+
+
+def goal(achieved=True, gap=""):
+    return json.dumps({"achieved": achieved, "gap": gap}, ensure_ascii=False)
+
+
+def _review_or_final(msgs):
+    """默认的校验回复：全部通过。给只关心规划与收尾的用例用。"""
+    role = msgs[0].content
+    if "结果校验器" in role:
+        return reviews()
+    if "完成校验器" in role:
+        return goal()
+    return final()
+
+
+def llm_for(first, replan=None, answer="完成", checked=None, done=None):
     def responder(msgs):
         role = msgs[0].content
+        if "结果校验器" in role:
+            return checked or reviews()
+        if "完成校验器" in role:
+            return done or goal()
         if "重规划器" in role:
             return replan or plan()
         if "规划器" in role:
@@ -214,7 +244,8 @@ class TestEvaluator:
 
 class TestRouters:
     def test_after_scheduler_no_work(self):
-        assert route_after_scheduler({"dispatch": []}) == "finalizer"
+        """没有可派发的任务 → 先过完成校验，再由它决定收尾还是补做。"""
+        assert route_after_scheduler({"dispatch": []}) == "goal_verifier"
 
     def test_after_scheduler_fans_out(self):
         """返回 Send 列表即并行派发；本地与 MiClaw 可在同一轮扇出到不同节点。"""
@@ -228,6 +259,11 @@ class TestRouters:
         for v, node in [("success", "scheduler"), ("retry", "scheduler"),
                         ("replan", "replanner"), ("abort", "finalizer")]:
             assert route_after_evaluator({"verdict": v}) == node
+
+    def test_after_goal_verifier(self):
+        assert route_after_goal_verifier({"verdict": "replan"}) == "replanner"
+        assert route_after_goal_verifier({"verdict": None}) == "finalizer"
+        assert route_after_goal_verifier({}) == "finalizer"
 
 
 class TestEndToEnd:
@@ -302,7 +338,8 @@ class TestEndToEnd:
             plan(task("a", "system.query_calendar", when="今晚"),
                  task("b", "system.create_event", title="晚餐", when={"$from": "a"})),
         ])
-        llm = FakeLLM(responder=lambda m: next(outs) if "规划器" in m[0].content else final())
+        llm = FakeLLM(responder=lambda m: next(outs) if "规划器" in m[0].content
+                      else _review_or_final(m))
         out = run(registry, "安排晚餐", llm)
         assert out["failure"] is None
         assert llm.repair_count == 1
@@ -357,11 +394,14 @@ def _functions_touching(attr_owner: str, attr: str, path) -> set[str]:
 
 
 def test_model_is_confined_to_planning_nodes():
-    """模型只允许在规划与收尾环节被调用。
+    """模型只允许在规划、校验与收尾三类环节被调用。
 
     调度、执行、评估三个环节要回答的问题都有确定答案——依赖是否满足、
     是否超出重试上限、是否全部完成、该重试还是该换方案。用模型去猜一个
     我们确定知道答案的问题，既慢又不可复现，端侧尤其付不起这个代价。
+
+    校验问的是「拿到的结果算不算达成了要做的事」，没有确定答案，因此交给
+    模型；但它给出的只是判定，能改动什么由 verify.py 的纯函数决定。
 
     这条约束此前只写在文档里。文档约束不会在被破坏时报警，故在此固化：
     新加的节点若持有模型引用，本用例立即失败。
@@ -371,8 +411,9 @@ def test_model_is_confined_to_planning_nodes():
     nodes_py = Path(__file__).resolve().parent.parent / "miagent" / "graph" / "nodes.py"
     touching = _functions_touching("deps", "llm", nodes_py)
 
-    # _plan 是 Planner 与 Replanner 共用的规划实现；finalizer 生成给用户的回答。
-    assert touching == {"_plan", "finalizer"}, (
+    # _plan 是 Planner 与 Replanner 共用的规划实现；_review 是两个校验节点
+    # 共用的调用实现；finalizer 生成给用户的回答。
+    assert touching == {"_plan", "_review", "finalizer"}, (
         f"模型调用范围发生变化，当前出现在 {sorted(touching)}。"
         "调度、执行、评估环节的判断均有确定答案，必须由纯函数承担。"
     )

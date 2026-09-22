@@ -62,12 +62,14 @@ class ErrorCode(StrEnum):
     AG_PLAN_NO_PROGRESS = "AG-1003"
     AG_INVALID_PLAN = "AG-1004"
     AG_DEPENDENCY_UNRESOLVED = "AG-1005"
+    AG_GOAL_NOT_ACHIEVED = "AG-1006"
 
     # ===== AG-2xxx 工具调度层 =====
     AG_TOOL_NOT_REGISTERED = "AG-2001"
     AG_TOOL_SCHEMA_INVALID = "AG-2002"
     AG_TOOL_RESULT_UNPARSABLE = "AG-2003"
     AG_TOOL_EXECUTION_FAILED = "AG-2004"
+    AG_RESULT_REJECTED = "AG-2005"
 
     # ===== AG-3xxx 上下文管理层 =====
     AG_CONTEXT_OVERFLOW = "AG-3001"
@@ -115,11 +117,13 @@ _SPEC: dict[ErrorCode, tuple[int | None, str]] = {
     ErrorCode.AG_PLAN_NO_PROGRESS:      (None, "连续重复同一调用，判定为无进展循环"),
     ErrorCode.AG_INVALID_PLAN:          (None, "任务图非法：依赖缺失、自依赖或存在环"),
     ErrorCode.AG_DEPENDENCY_UNRESOLVED: (None, "存在无法满足的依赖，调度死锁"),
+    ErrorCode.AG_GOAL_NOT_ACHIEVED:     (None, "任务已执行完，但校验判定用户目标未达成"),
 
     ErrorCode.AG_TOOL_NOT_REGISTERED:   (None, "Agent 本地未注册该工具"),
     ErrorCode.AG_TOOL_SCHEMA_INVALID:   (None, "工具参数未通过 schema 校验"),
     ErrorCode.AG_TOOL_RESULT_UNPARSABLE: (None, "工具返回内容无法解析"),
     ErrorCode.AG_TOOL_EXECUTION_FAILED: (None, "工具执行时抛出未预期异常"),
+    ErrorCode.AG_RESULT_REJECTED:       (None, "工具结果未达成任务目标，校验未通过"),
 
     ErrorCode.AG_CONTEXT_OVERFLOW:      (None, "上下文长度超出模型窗口"),
     ErrorCode.AG_STATE_CORRUPTED:       (None, "Agent 状态非法"),

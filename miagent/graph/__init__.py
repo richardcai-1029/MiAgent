@@ -3,13 +3,13 @@
 图的拓扑：
 
     START → Planner → Scheduler ─┬→ LocalTool  ─┐
-                                 ├→ MCPExecutor ┴→ Evaluator ─┬→ Scheduler
-                                 └→ Finalizer → END           ├→ Replanner → Scheduler
-                                                              └→ Finalizer
+                                 ├→ MCPExecutor ┴→ ResultVerifier → Evaluator ─┬→ Scheduler
+                                 └→ GoalVerifier ─┬→ Finalizer → END           ├→ Replanner → Scheduler
+                                                  └→ Replanner → Scheduler     └→ Finalizer
 
-模型负责「拆成什么任务、依赖怎么连、失败后换什么方案」；
-依赖是否满足、能否重试、是否完成、是否死锁，全部由 dag.py 的
-纯函数确定性地判定。
+模型负责「拆成什么任务、依赖怎么连、失败后换什么方案、结果算不算达成」；
+依赖是否满足、能否重试、是否完成、是否死锁，以及校验结论能改动什么，
+全部由 dag.py 与 verify.py 的纯函数确定性地判定。
 
 ★ build_agent 采用惰性导入：只有真正要构图时才加载 langgraph。
   依赖解析（dag）、状态定义（state）、计划 schema 都是纯 Python，
@@ -18,15 +18,17 @@
 
 from typing import TYPE_CHECKING, Any
 
-from . import dag
+from . import dag, verify
 from .nodes_meta import Deps  # noqa: F401  轻量转发，见该模块说明
-from .schema import FinalOutput, TaskPlan, TaskSpec, task_plan_model_for
+from .schema import (FinalOutput, GoalReview, ResultReview, ResultReviewBatch,
+                     TaskPlan, TaskSpec, result_review_model_for, task_plan_model_for)
 from .state import (
     MAX_ATTEMPTS_PER_TASK,
     MAX_REPLANS,
     MAX_TOTAL_EXECUTIONS,
     AgentState,
     DispatchItem,
+    Review,
     Task,
     TaskOutcome,
     TaskStatus,
@@ -39,9 +41,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_ATTEMPTS_PER_TASK", "MAX_REPLANS", "MAX_TOTAL_EXECUTIONS",
-    "AgentState", "Deps", "DispatchItem", "FinalOutput", "Task", "TaskOutcome",
+    "AgentState", "Deps", "DispatchItem", "FinalOutput", "GoalReview",
+    "ResultReview", "ResultReviewBatch", "Review", "Task", "TaskOutcome",
     "TaskPlan", "TaskSpec", "TaskStatus",
-    "build_agent", "dag", "initial_state", "new_task", "task_plan_model_for",
+    "build_agent", "dag", "initial_state", "new_task", "result_review_model_for",
+    "task_plan_model_for", "verify",
 ]
 
 

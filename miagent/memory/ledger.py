@@ -10,6 +10,7 @@ Replanner 与 Finalizer 面对的是同一件事：把到了终态的任务从�
     settle   重规划前：结算终态任务，给出可保留的已完成任务与提示词片段
     accept   重规划后：验收模型给出的新任务图 —— 剪枝、判无进展、定 failure
     close    收尾：结算剩余终态任务，给出执行概况与执行明细
+    survey   完成校验：只读地取出执行明细，不结算、不改状态
 
 failure 的规则在这里兑现：成功的重规划清除它（新计划按构造覆盖了全部
 失败记录），重规划未产出新任务则取根因码，新计划全是失败过的调用则判无进展。
@@ -30,7 +31,8 @@ from ..graph.state import Episode, Task, TaskStatus
 from ..protocol import ErrorCode
 from . import episodic
 
-__all__ = ["Settlement", "Acceptance", "Closing", "settle", "accept", "close"]
+__all__ = ["Settlement", "Acceptance", "Closing", "Survey",
+           "settle", "accept", "close", "survey"]
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,14 @@ class Acceptance:
     added: int                      # 新任务数
     kept: int                       # 为供引用而留在图里的已完成任务数
     repeated: list[str]             # 判无进展时被认定为重复的新任务 id；否则为空
+
+
+@dataclass(frozen=True)
+class Survey:
+    """只读的执行明细快照。"""
+
+    history: list[str]              # 每任务一行
+    n_settled: int                  # 已进入情景记忆的记录数
 
 
 @dataclass(frozen=True)
@@ -88,7 +98,8 @@ def settle(tasks: dict[str, Task], episodes: list[Episode],
     )
 
 
-def accept(settlement: Settlement, merged: dict[str, Task]) -> Acceptance:
+def accept(settlement: Settlement, merged: dict[str, Task],
+           standing: str | None = None) -> Acceptance:
     """验收模型给出的任务图。merged 是 keep 与新任务合并后、已通过结构校验的图。
 
     三步，顺序不可换：
@@ -98,19 +109,21 @@ def accept(settlement: Settlement, merged: dict[str, Task]) -> Acceptance:
       2. 剪枝：只留新任务引用到的已完成任务（含其上游）——校验要求依赖边
          指向图里存在的任务，派发前要取它们的结果。其余终态任务已在情景记忆里。
       3. 未产出新任务：重规划是恢复机制，跑完却没有新任务说明恢复没发生，
-         失败的部分不会再有人接手，据实标记为未达成，错误码取根因。
+         失败的部分不会再有人接手，据实标记为未达成，错误码取根因；失败记录里
+         找不出根因时沿用 standing —— 进入重规划时尚未清除的那个码，
+         完成校验判定的未达成就属于这种情况，它没有对应的失败任务。
          产出了新任务则清除 failure —— 新计划看到了全部失败记录并覆盖了剩余工作。
     """
     new_ids = set(merged) - set(settlement.keep)
     new_tasks = {tid: merged[tid] for tid in new_ids}
 
-    if episodic.repeats_failures(new_tasks, settlement.episodes):
+    if episodic.repeats_calls(new_tasks, settlement.episodes):
         return Acceptance(tasks={}, failure=ErrorCode.AG_PLAN_NO_PROGRESS.value,
                           added=len(new_ids), kept=0, repeated=sorted(new_ids))
 
     needed = dag.ancestors(merged, new_ids)
     pruned = {tid: t for tid, t in merged.items() if tid in new_ids or tid in needed}
-    failure = _root_failure(settlement.episodes) if not new_ids else None
+    failure = (_root_failure(settlement.episodes) or standing) if not new_ids else None
     return Acceptance(tasks=pruned, failure=failure, added=len(new_ids),
                       kept=len(needed), repeated=[])
 
@@ -124,6 +137,15 @@ def close(tasks: dict[str, Task], episodes: list[Episode], replan_count: int) ->
     return Closing(tasks=tasks, new_episodes=new,
                    summary=episodic.summarize(tasks, full),
                    history=episodic.history(full, tasks))
+
+
+def survey(tasks: dict[str, Task], episodes: list[Episode]) -> Survey:
+    """执行明细的只读视图。
+
+    完成校验要在收尾之前看到这一轮做了什么，但它不该动状态：结算发生在
+    重规划与收尾两处，多一处就多一份「这条记录属于哪一代」的分歧。
+    """
+    return Survey(history=episodic.history(episodes, tasks), n_settled=len(episodes))
 
 
 def _root_failure(episodes: list[Episode]) -> str | None:

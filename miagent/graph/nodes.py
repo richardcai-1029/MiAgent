@@ -1,15 +1,19 @@
-"""图的六类节点。
+"""图的八类节点。
 
 每个节点都是「读 State，返回要更新的字段」的普通函数。
 
-职责划分的一条硬线：
+职责划分的一条硬线，分界是**问题有没有确定答案**：
 
-    交给模型的： 把目标拆成什么任务、任务之间有什么依赖、失败后换什么方案
+    交给模型的： 把目标拆成什么任务、任务之间有什么依赖、失败后换什么方案、
+                 拿到的结果算不算达成了任务的目的
     绝不交给的： 依赖是否满足、是否超出重试上限、是否全部完成、
-                 哪些可以并行、是否死锁
+                 哪些可以并行、是否死锁、参数合不合 schema
 
-  后者都有确定答案，写在 dag.py 里，是纯函数、可穷举测试。
+  后者都有确定答案，写在 dag.py 与 tools/validation.py 里，是纯函数、可穷举测试。
   用模型去猜一个我们确定知道答案的问题，既慢又不可靠。
+
+  前者的最后一项由校验节点承担，但模型给出的只是判定：判定能改动什么、
+  修正的参数能不能派发，仍由 verify.py 的纯函数决定（只收紧不放宽）。
 """
 
 from __future__ import annotations
@@ -25,15 +29,17 @@ from ..memory import anchor as anchor_mod, ledger
 from ..memory.session import render_history
 from ..protocol import AgentError, ErrorCode, RetryPolicy, describe
 from ..tools import ToolRegistry, ToolSource
-from . import dag, dataflow
+from . import dag, dataflow, verify
 from .nodes_meta import Deps
-from .schema import FinalOutput, task_plan_model_for
+from .schema import (FinalOutput, GoalReview, result_review_model_for,
+                     task_plan_model_for)
 from .state import (
     MAX_ATTEMPTS_PER_TASK,
     DispatchItem,
     MAX_REPLANS,
     MAX_TOTAL_EXECUTIONS,
     AgentState,
+    Review,
     Task,
     TaskOutcome,
     TaskStatus,
@@ -111,21 +117,22 @@ def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
     return tasks, notes
 
 
-def _describe_tools(registry: ToolRegistry) -> str:
-    return json.dumps(registry.to_model_schemas(), ensure_ascii=False, indent=2)
-
-
-def _tools_section(registry: ToolRegistry) -> Section:
+def _tools_section(registry: ToolRegistry, names: set[str] | None = None) -> Section:
     """工具描述：预算不够时削减为只剩工具名。
 
     完整 schema 是规划质量的主要输入，但窗口触顶时保留工具名，
     模型仍有机会选对工具并配合自修复补齐参数；整段丢掉则连选都无从选起。
+
+    names 给定时只描述这几个工具。校验时只有本轮调过的工具与修正有关，
+    其余工具的 schema 进了提示词也只是占窗口。
     """
+    tools = [t for t in registry if names is None or t.name in names]
+    schemas = json.dumps([t.to_model_schema() for t in tools], ensure_ascii=False, indent=2)
     return Section(
         "工具描述",
-        f"可用工具：\n{_describe_tools(registry)}",
+        f"可用工具：\n{schemas}",
         priority=1,
-        compact="可用工具：" + "、".join(t.name for t in registry),
+        compact="可用工具：" + "、".join(t.name for t in tools),
     )
 
 
@@ -198,7 +205,7 @@ def scheduler(state: AgentState, deps: Deps) -> dict[str, Any]:
         # —— 重规划成功接手时，前一条路失败恰恰是正常剧情。
         # 「恢复机制交了白卷」由 Replanner 自己判定，见该节点。
         return {"tasks": tasks, "dispatch": [], "verdict": None,
-                "trace": [f"scheduler: 全部完成（成功 {n_ok} / 失败 {n_bad}）→ finalizer"]}
+                "trace": [f"scheduler: 全部完成（成功 {n_ok} / 失败 {n_bad}）→ 完成校验"]}
 
     # 累计执行预算。此前只在失败分支里检查，因而完全约束不住顺利执行的流程 ——
     # 模型拆出多少任务就执行多少次。预算要能兜住的恰恰是这种情况。
@@ -280,13 +287,167 @@ def execute(payload: dict[str, Any], deps: Deps, source: ToolSource) -> dict[str
         retry_policy=result.retry_policy.value, attempt=attempt,
     )
     mark = "✓" if outcome["ok"] else f"✗ {outcome['error_code']}"
-    waited = f"，退避 {deps.retry_delay_ms}ms 后" if attempt > 1 else ""
+    waited = f"退避 {deps.retry_delay_ms}ms 后，" if attempt > 1 else ""
     return {"outcomes": [outcome], "execution_count": 1,
             "trace": [f"{source.value}: {task['id']} {mark}（{waited}第 {attempt} 次）"]}
 
 
 # ============================================================
-# ⑤ Evaluator —— 判定并落库任务状态
+# ⑤ 校验 —— 结果与完成状态的语义判定
+# ============================================================
+
+# 两个校验节点共用的取数与调用。判定的边界写在 verify.py，这里只负责
+# 把要校验的东西拼成提示词、把模型的回答取回来。
+#
+# ★ 校验的输入片段一律不可裁（priority 0）：基于残缺记录做出的校验结论，
+#   错在「把做成了的事判成没做成」这一侧，比不校验更糟。放不下就不校验，
+#   由调用方按 AG-3001 退回原判定。可裁的只有工具描述 —— 少了它至多是
+#   给不出修正参数，判定本身不受影响。
+
+
+def _review(deps: Deps, role: str, sections: list[Section],
+            model: type[BaseModel]) -> tuple[BaseModel, list[str]]:
+    schema_json = json.dumps(model.model_json_schema(), ensure_ascii=False)
+    reserve = deps.llm.estimate(schema_json) + deps.llm.estimate(role)
+    body, notes = fit(sections, deps.llm.context_limit - reserve, deps.llm.estimate)
+    return deps.llm.complete_structured([system(role), user(body)], model), notes
+
+
+_RESULT_VERIFIER_ROLE = (
+    "你是端侧智能助理的结果校验器。逐个判断任务的执行结果是否达成了该任务要做的事，"
+    "只依据给出的信息判断，不要设想没有写出来的内容。"
+    "结果确实是任务要的东西时 passed 为 true；"
+    "结果与任务不符（查到的不是要查的对象、创建的内容与要求不一致、结果为空或答非所问）时 passed 为 false。"
+    "只有当失败或不符的原因是参数写错、且用户目标里已经给出了正确取值时，"
+    "才在 corrected_arguments 里给出修正后的完整参数；推断不出正确取值就填 null，不要猜。"
+    "每个待校验任务给且只给一条判定。"
+)
+
+
+def _review_items(state: AgentState, pending: list[TaskOutcome]) -> str:
+    """待校验清单。参数取实际传入工具的那一份（引用已求值），
+    否则模型看到的是 `$from` 而不是工具真正收到的东西。"""
+    dispatched = {d["task"]["id"]: d["task"] for d in state.get("dispatch") or []}
+    blocks = []
+    for o in pending:
+        task = dispatched.get(o["task_id"]) or state["tasks"][o["task_id"]]
+        args = json.dumps(task["arguments"], ensure_ascii=False)
+        outcome = (f"  执行结果：{o['content']}" if o["ok"]
+                   else f"  调用失败：{o['content']}")
+        blocks.append(f"任务 {o['task_id']}：{task['description']}\n"
+                      f"  调用：{o['tool']}，参数 {args}\n{outcome}")
+    return "\n".join(blocks)
+
+
+def verify_results(state: AgentState, deps: Deps) -> dict[str, Any]:
+    """对本轮的执行结果做语义校验，产出判定，不改任务状态。
+
+    落库仍归 Evaluator：判定与规则分在两处，才能一边换判定来源、
+    一边保证「该重试还是该重规划」始终由同一套确定性规则推出。
+    """
+    outcomes = state.get("outcomes") or []
+    pending = [o for o in outcomes if verify.needs_review(o)]
+    if not deps.verify or not pending:
+        why = "已关闭" if not deps.verify else "本轮无可校验项（失败原因已确定）"
+        return {"trace": [f"verifier: 跳过结果校验（{why}）"]}
+
+    tools = {o["tool"] for o in pending}
+    try:
+        batch, notes = _review(deps, _RESULT_VERIFIER_ROLE, [
+            Section("用户目标", f"用户目标：{state['user_request']}"),
+            _tools_section(deps.registry, tools),
+            Section("待校验", f"待校验的执行结果：\n{_review_items(state, pending)}"),
+            Section("要求", "请逐条判断结果是否达成了该任务要做的事。"),
+        ], result_review_model_for([o["task_id"] for o in pending]))
+    except AgentError as e:
+        # 校验不可用（窗口放不下、输出始终不合 schema、模型不可达）时退回原判定：
+        # 校验只收紧不放宽，因此它缺席只是回到没有语义校验的判定，不会误伤。
+        return {"trace": [f"verifier: 校验未完成（{e.code}），本轮按原判定处理"]}
+
+    reviews, lines = _accept_reviews(state, deps, batch, pending)
+    return {"reviews": reviews,
+            "trace": [f"verifier: 校验 {len(pending)} 项 → {'；'.join(lines)}"
+                      + _trace_trim(notes)]}
+
+
+def _accept_reviews(state: AgentState, deps: Deps, batch: Any,
+                    pending: list[TaskOutcome]) -> tuple[list[Review], list[str]]:
+    """把模型的判定过一遍确定性的闸，返回可落库的判定与 trace 说明。
+
+    漏判的任务按通过处理：判定缺席不该让一个成功的调用变成失败。
+    """
+    judged = {r.task_id: r for r in batch.reviews}
+    reviews: list[Review] = []
+    lines: list[str] = []
+    for o in pending:
+        verdict = judged.get(o["task_id"])
+        if verdict is None or verdict.passed:
+            continue
+        task = state["tasks"][o["task_id"]]
+        tool = deps.registry.get(task["required_tool"])
+        correction, refused = verify.accept_correction(
+            task, verdict.corrected_arguments,
+            tool.input_schema if tool is not None else None)
+        reviews.append(Review(task_id=o["task_id"], ok=False,
+                              reason=verdict.reason, correction=correction))
+        lines.append(f"{o['task_id']} 未通过（{verdict.reason}）"
+                     + (f"，参数已修正为 {json.dumps(correction, ensure_ascii=False)}"
+                        if correction else f"，不就地修正：{refused}"))
+    if not lines:
+        lines.append("全部通过")
+    return reviews, lines
+
+
+_GOAL_VERIFIER_ROLE = (
+    "你是端侧智能助理的完成校验器。对照用户目标与最初的拆解，"
+    "判断这一轮的执行是否已经把用户要的事做完。"
+    "目标的每一点都有对应的执行结果时 achieved 为 true，gap 留空；"
+    "还有要点没做、或执行结果没有覆盖它时 achieved 为 false，gap 用一句话说明还差什么。"
+    "只依据执行记录判断，不要设想没有写出来的内容，也不要因为回答可以更完善就判未达成。"
+)
+
+
+def verify_goal(state: AgentState, deps: Deps) -> dict[str, Any]:
+    """全部任务都到了终态之后、收尾之前，校验目标是否真的达成。
+
+    「所有任务都到了终态」只说明没有东西可调度了。计划本身漏掉了一步、
+    或者每一步都成功却合不成用户要的结果，在任务图这一层没有任何迹象 ——
+    这个判断没有确定答案，交给模型，判定未达成时转重规划去补。
+
+    三种情况不花这次推理：校验已关闭、本轮一次工具都没调（没有执行可校验）、
+    已经带着错误码（不会声称成功，再判一次没有新信息）。
+    """
+    if not deps.verify or state["execution_count"] == 0 or state.get("failure"):
+        return {}
+
+    s = ledger.survey(state["tasks"], state["episodes"])
+    try:
+        review, notes = _review(deps, _GOAL_VERIFIER_ROLE, [
+            anchor_mod.render(state["anchor"]),
+            Section("执行记录", "本轮执行记录：\n" + ("\n".join(s.history) or "  （无）")),
+            Section("要求", "请判断用户目标是否已经达成。"),
+        ], GoalReview)
+    except AgentError as e:
+        return {"trace": [f"verifier: 完成校验未完成（{e.code}），按已完成收尾"]}
+
+    if review.achieved:
+        return {"trace": [f"verifier: 完成校验通过{_trace_trim(notes)}"]}
+
+    code = ErrorCode.AG_GOAL_NOT_ACHIEVED.value
+    out: dict[str, Any] = {
+        "failure": code, "gap": review.gap,
+        "errors": [{"stage": "goal_verifier", "code": code, "gap": review.gap}]}
+    if state["replan_count"] >= MAX_REPLANS:
+        out["trace"] = [f"verifier: 目标未达成（{review.gap}），重规划已达上限 → finalizer"]
+        return out
+    # 判定归模型，去哪儿归路由：verdict 是节点与路由之间既有的那一个字段。
+    out["verdict"] = "replan"
+    out["trace"] = [f"verifier: 目标未达成（{review.gap}）→ replanner" + _trace_trim(notes)]
+    return out
+
+
+# ============================================================
+# ⑥ Evaluator —— 判定并落库任务状态
 # ============================================================
 
 _RETRIABLE = {RetryPolicy.BACKOFF.value, RetryPolicy.REHANDSHAKE.value}
@@ -305,8 +466,13 @@ def evaluator(state: AgentState, deps: Deps) -> dict[str, Any]:
     并行执行时本轮可能有多条结果，逐条落库后按优先级聚合成一个判定：
     只要有任务需要重规划，整轮就走 Replanner —— 它拿到的是完整任务图，
     能同时看到本轮成功与失败的部分。
+
+    语义校验的判定在这里与执行结果合并：未通过校验的成功按失败落库
+    （错误码 AG-2005），带着已通过把关的修正参数的则换上新参数重试。
+    合并规则确定，判定本身来自校验节点。
     """
     tasks = {tid: dict(t) for tid, t in state["tasks"].items()}
+    reviews = {r["task_id"]: r for r in state.get("reviews") or []}
     verdicts: list[str] = []
     failure = None
     errors: list[dict[str, Any]] = []
@@ -315,27 +481,35 @@ def evaluator(state: AgentState, deps: Deps) -> dict[str, Any]:
     for last in state["outcomes"]:
         task = tasks[last["task_id"]]
         task["retry_count"] = last["attempt"]
+        review = reviews.get(last["task_id"])
+        code = verify.outcome_code(last, review)
+        content = verify.rejection_text(last, review)
+        correction = verify.correction_of(review)
 
-        if last["ok"]:
-            task["status"], task["result"] = TaskStatus.DONE, last["content"]
+        if code is None:
+            task["status"], task["result"] = TaskStatus.DONE, content
             verdict = "success"
         else:
-            task["error"] = last["error_code"]
-            errors.append({"task": task["id"], "code": last["error_code"],
+            task["error"] = code
+            errors.append({"task": task["id"], "code": code,
                            "attempt": last["attempt"]})
             if state["execution_count"] >= MAX_TOTAL_EXECUTIONS:
-                task["status"], task["result"] = TaskStatus.FAILED, last["content"]
+                task["status"], task["result"] = TaskStatus.FAILED, content
                 verdict = "abort"
                 failure = ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
+            elif correction is not None and last["attempt"] < MAX_ATTEMPTS_PER_TASK:
+                # 参数偏差已被修正：换上新参数重试同一个任务，不必重规划整张图。
+                task["arguments"] = correction
+                task["status"], verdict = TaskStatus.PENDING, "retry"
             elif (last["retry_policy"] in _RETRIABLE
                   and last["attempt"] < MAX_ATTEMPTS_PER_TASK):
                 # 退回 pending，让 Scheduler 下一轮重新派发同一个任务
                 task["status"], verdict = TaskStatus.PENDING, "retry"
             elif state["replan_count"] < MAX_REPLANS:
-                task["status"], task["result"] = TaskStatus.FAILED, last["content"]
+                task["status"], task["result"] = TaskStatus.FAILED, content
                 verdict = "replan"
             else:
-                task["status"], task["result"] = TaskStatus.FAILED, last["content"]
+                task["status"], task["result"] = TaskStatus.FAILED, content
                 verdict = "abort"
                 failure = ErrorCode.AG_PLAN_NO_PROGRESS.value
 
@@ -345,7 +519,8 @@ def evaluator(state: AgentState, deps: Deps) -> dict[str, Any]:
     final = max(verdicts, key=lambda v: _VERDICT_RANK[v]) if verdicts else "success"
     out: dict[str, Any] = {
         "tasks": tasks, "verdict": final, "errors": errors,
-        "outcomes": [],          # 空列表触发 reducer 重置，避免下一轮重复消费
+        # 空列表触发 reducer 重置，避免下一轮重复消费
+        "outcomes": [], "reviews": [],
         "trace": [f"evaluator: {' '.join(lines)} → {final}"
                   + (f"（{failure}）" if failure else "")]}
     # 只在判定中止时写 failure。Replanner 失败后剩余任务仍会继续执行，
@@ -356,7 +531,7 @@ def evaluator(state: AgentState, deps: Deps) -> dict[str, Any]:
 
 
 # ============================================================
-# ⑥ Replanner —— 带着失败上下文重建剩余任务图
+# ⑦ Replanner —— 带着失败上下文重建剩余任务图
 # ============================================================
 
 
@@ -370,14 +545,23 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
     只把新计划引用到的已完成任务留在图里，判无进展，定 failure。
     图里只装还要调度的东西，历史交给 episodes —— 否则每一轮重规划都带着
     越来越长的历史，挤占端侧本就小的窗口。
+
+    两种入口对应两段不同的交代：任务失败后是「换条路把剩下的做完」，
+    完成校验判未达成后是「按指出的缺口把漏掉的补上」。后者没有失败记录，
+    只写前一句会让模型去找一个并不存在的失败。
     """
     s = ledger.settle(state["tasks"], state["episodes"], state["replan_count"])
+    gap = state.get("gap")
+    why = (f" 任务都执行完了，但校验发现目标尚未达成：{gap}。"
+           "请只规划补齐这个缺口所需的任务，已经做成的事不要重做。"
+           if gap else
+           " 原任务图中有任务失败了，请基于已完成的结果重新规划【剩余】工作，"
+           "避开失败的做法。")
     try:
         merged, notes = _plan(
             deps,
             _PLANNER_ROLE.replace("任务规划器", "任务重规划器")
-            + " 原任务图中有任务失败了，请基于已完成的结果重新规划【剩余】工作，"
-              "避开失败的做法。新任务可以依赖已完成任务的 id。",
+            + why + "新任务可以依赖已完成任务的 id。",
             [
                 # 目标锚放最前、不可裁：几轮重规划之后提示词里全是局部的成败记录，
                 # 新计划要有一个「原本要做什么」可以对照，否则越走越偏且无从察觉。
@@ -396,15 +580,17 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
             keep=s.keep,        # 新任务可以依赖已完成任务；失败任务只存在于情景记忆
         )
     except AgentError as e:
-        return {"episodes": s.new_episodes, "replan_count": s.generation,
+        return {"episodes": s.new_episodes, "replan_count": s.generation, "gap": None,
                 "failure": e.code.value,
                 "errors": [{"stage": "replanner", "code": e.code.value}],
                 "trace": [f"replanner: 重规划失败 {e.code}"]}
 
-    a = ledger.accept(s, merged)
+    # standing：完成校验判定的未达成没有对应的失败任务，重规划交白卷时
+    # 那个码必须留住，否则「没补上缺口」会被当成「没有问题」。
+    a = ledger.accept(s, merged, standing=state.get("failure"))
     out: dict[str, Any] = {
         "tasks": a.tasks, "episodes": s.new_episodes, "dispatch": [], "verdict": None,
-        "failure": a.failure, "replan_count": s.generation,
+        "failure": a.failure, "replan_count": s.generation, "gap": None,
     }
     if a.repeated:
         out["errors"] = [{"stage": "replanner", "code": a.failure, "repeated": a.repeated}]
@@ -420,7 +606,7 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
 
 
 # ============================================================
-# ⑦ Finalizer —— 汇总成给用户的回答
+# ⑧ Finalizer —— 汇总成给用户的回答
 # ============================================================
 
 

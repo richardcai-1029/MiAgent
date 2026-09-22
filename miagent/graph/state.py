@@ -86,6 +86,20 @@ class TaskOutcome(TypedDict):
     attempt: int
 
 
+class Review(TypedDict):
+    """一条执行结果的语义校验判定。由校验节点产出，Evaluator 落库。
+
+    判定本身只回答「这次执行算不算达成了任务的目标」；该重试还是该重规划
+    仍由 Evaluator 按既有规则推出。correction 非空表示模型给出的新参数已经
+    通过确定性把关（见 graph.verify），可以直接拿去重试同一个任务。
+    """
+
+    task_id: str
+    ok: bool
+    reason: str
+    correction: dict[str, Any] | None
+
+
 class Episode(TypedDict):
     """情景记忆的一条记录：离开任务图的终态任务的压缩形式。
     只保留重规划与收尾用得到的部分；行为见 miagent.memory.episodic。"""
@@ -134,6 +148,8 @@ class AgentState(TypedDict, total=False):
     dispatch: list[DispatchItem]
     # 并行分支各自写回一条结果，用 reducer 汇总；Evaluator 消费后清空。
     outcomes: Annotated[list[TaskOutcome], append_or_reset]
+    # 本轮结果的语义校验判定，与 outcomes 一同被 Evaluator 消费后清空。
+    reviews: Annotated[list[Review], append_or_reset]
 
     # ---------- 历史（只增不改，用 reducer）----------
     errors: Annotated[list[dict[str, Any]], operator.add]
@@ -153,6 +169,10 @@ class AgentState(TypedDict, total=False):
     execution_summary: dict[str, Any]
     final_answer: str
     turn_summary: str           # 本轮摘要，供下一轮规划参考
+    # 完成校验指出的缺口：非空表示执行跑完了但目标没达成，内容是还差什么。
+    # 由重规划消费，规划完即清除。
+    gap: str | None
+
     # 非空表示任务未完成，值为错误码。
     # 清除规则只有一条：成功的重规划清除它（新计划按构造覆盖了全部失败记录），
     # 单个任务成功不清除 —— 重规划失败后剩余任务照常执行，它们成功不代表恢复发生了。
@@ -189,6 +209,7 @@ def initial_state(user_request: str) -> AgentState:
         anchor={},
         dispatch=[],
         outcomes=[],
+        reviews=[],
         errors=[],
         trace=[],
         episodes=[],
@@ -198,5 +219,6 @@ def initial_state(user_request: str) -> AgentState:
         execution_summary={},
         final_answer="",
         turn_summary="",
+        gap=None,
         failure=None,
     )

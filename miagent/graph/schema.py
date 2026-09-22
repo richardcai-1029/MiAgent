@@ -99,3 +99,67 @@ def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
         __config__=ConfigDict(extra="forbid"),
         tasks=(list[spec], Field(description="任务列表；无依赖的任务可并行")),
     )
+
+
+class ResultReview(BaseModel):
+    """对一次工具调用结果的校验判定。
+
+    corrected_arguments 是「自动修正」的落点，但它只是**提议**：
+    能不能派发由 `graph.verify.accept_correction` 确定性地决定。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(description="被校验的任务 id")
+    passed: bool = Field(description="结果是否达成了该任务描述要求的事")
+    reason: str = Field(description="一句话说明判断依据")
+    corrected_arguments: dict[str, Any] | None = Field(
+        default=None,
+        description="仅当失败原因是参数写错、且能从用户目标断定正确取值时填写："
+                    "修正后的【完整】参数对象；无法断定就填 null，不要猜")
+
+
+class ResultReviewBatch(BaseModel):
+    """一轮执行里全部待校验结果的判定，一次调用给全。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviews: list[ResultReview] = Field(description="每个待校验任务一条判定")
+
+
+class GoalReview(BaseModel):
+    """对整轮执行状态的校验判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    achieved: bool = Field(description="用户目标是否已经达成")
+    gap: str = Field(default="", description="未达成时说明还差什么，一句话；达成时留空")
+
+
+def result_review_model_for(task_ids: Sequence[str]) -> type[BaseModel]:
+    """按本轮待校验的任务收紧 schema：task_id 成为枚举。
+
+    与工具名收进 enum 同一个道理 —— 判定挂错任务比判错更难察觉，
+    在解析阶段拒掉，比事后去对齐 id 可靠。
+    """
+    if not task_ids:
+        return ResultReviewBatch
+
+    review = create_model(
+        "ResultReviewConstrained",
+        __config__=ConfigDict(extra="forbid"),
+        task_id=(Literal[tuple(task_ids)],  # type: ignore[valid-type]
+                 Field(description="被校验的任务 id，必须是列出的之一")),
+        passed=(bool, Field(description="结果是否达成了该任务描述要求的事")),
+        reason=(str, Field(description="一句话说明判断依据")),
+        corrected_arguments=(
+            dict[str, Any] | None,
+            Field(default=None,
+                  description="仅当失败原因是参数写错、且能从用户目标断定正确取值时填写："
+                              "修正后的【完整】参数对象；无法断定就填 null，不要猜")),
+    )
+    return create_model(
+        "ResultReviewBatchConstrained",
+        __config__=ConfigDict(extra="forbid"),
+        reviews=(list[review], Field(description="每个待校验任务一条判定")),
+    )
