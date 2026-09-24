@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from ..graph.state import AgentState
+from ..llm.context import Estimator
 from ..memory.session import Agent, Session
 from ..protocol import (AgentMethod, ConversationEndParams, ErrorCode, MiClawError,
                         RequestPriority, ResourceBudget, TaskDispatchParams,
@@ -84,16 +85,20 @@ class Runtime:
 
     max_inflight 是同时在飞的请求上限 —— 每个在飞请求各持一份任务图与记忆，
     常驻内存随它线性增长。max_idle_sessions 是保留的空闲会话数上限。
+    history_limit 与 estimate 交给每个会话，决定单个会话保留几轮（见 Session）。
     """
 
     def __init__(self, agent: Agent, max_inflight: int = MAX_INFLIGHT,
                  config: dict[str, Any] | None = None,
-                 max_idle_sessions: int = MAX_IDLE_SESSIONS) -> None:
+                 max_idle_sessions: int = MAX_IDLE_SESSIONS,
+                 history_limit: int | None = None, estimate: Estimator = len) -> None:
         if max_inflight < 1:
             raise ValueError(f"max_inflight 至少为 1，收到 {max_inflight}")
         if max_idle_sessions < 0:
             raise ValueError(f"max_idle_sessions 不能为负，收到 {max_idle_sessions}")
         self.max_idle_sessions = max_idle_sessions
+        self._history_limit = history_limit
+        self._estimate = estimate
         self._agent = agent
         self._config = config
         self.max_inflight = max_inflight
@@ -120,7 +125,8 @@ class Runtime:
             if self._closed:
                 raise RuntimeError("运行时已关闭")
             if session not in self._sessions:
-                self._sessions[session] = Session(self._agent, self._config)
+                self._sessions[session] = Session(self._agent, self._config,
+                                                  self._history_limit, self._estimate)
             self._idle.pop(session, None)
             job = _Job(key=(-priority, next(self._seq)), session=session,
                        conversation=self._sessions[session], request=request)
@@ -246,6 +252,7 @@ def build_runtime(llm: LLM, registry: ToolRegistry, budget: ResourceBudget, *,
 
     MiClaw 调用槽的容量取握手下发的 max_concurrent_calls，由全部请求共用；
     推理槽装在 llm 上，同一个 llm 对象的所有调用都经它排队。
+    单个会话保留的轮次按这个 llm 的上下文上限与计量口径推出。
     手工装配时漏掉任何一处都不会报错，只会让并发超出配额，故收在这一处。
     """
     from ..graph import build_agent        # 惰性导入：本模块不依赖图引擎
@@ -256,7 +263,8 @@ def build_runtime(llm: LLM, registry: ToolRegistry, budget: ResourceBudget, *,
                         miclaw_slots=SlotPool(budget.max_concurrent_calls),
                         **build_kwargs)
     return Runtime(agent, max_inflight=max_inflight, config=config,
-                   max_idle_sessions=max_idle_sessions)
+                   max_idle_sessions=max_idle_sessions,
+                   history_limit=llm.context_limit, estimate=llm.estimate)
 
 
 def serve(runtime: Runtime, client: MiClawClient) -> None:

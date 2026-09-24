@@ -12,11 +12,11 @@ from miagent.client import MiClawClient
 from miagent.graph import build_agent
 from miagent.graph.nodes import _tools_section
 from miagent.llm import FakeLLM
-from miagent.llm.context import fit
+from miagent.llm.context import Section, fit
 from miagent.memory import Session, Turn
-from miagent.memory.session import render_history
+from miagent.memory.session import reachable, render_history
 from miagent.mock_server import MiClawMockServer
-from miagent.protocol import ErrorCode
+from miagent.protocol import AgentError, ErrorCode
 from miagent.tools import ToolRegistry, tool
 from miagent.transport import LoopbackTransport
 
@@ -74,8 +74,9 @@ def planner_prompt(llm, request):
                 if "规划器" in m[0].content and m[1].content.endswith(f"用户目标：{request}"))
 
 
-def turn(request, summary, failure=None):
-    return Turn(request=request, answer="", summary=summary, failure=failure, episodes=[])
+def turn(request, summary, failure=None, number=1):
+    return Turn(number=number, request=request, answer="", summary=summary,
+                failure=failure, episodes=[])
 
 
 class TestSessionRecordsTurns:
@@ -147,8 +148,9 @@ class TestHistoryReachesThePlanner:
 
 class TestHistoryIsTrimmedOldestFirst:
     def _turns(self):
-        return [turn("第一个请求", "第一轮结论"), turn("第二个请求", "第二轮结论"),
-                turn("第三个请求", "第三轮结论")]
+        return [turn("第一个请求", "第一轮结论", number=1),
+                turn("第二个请求", "第二轮结论", number=2),
+                turn("第三个请求", "第三轮结论", number=3)]
 
     def test_priorities_grow_with_age(self):
         sections = render_history(self._turns())
@@ -185,3 +187,98 @@ class TestHistoryIsTrimmedOldestFirst:
 
     def test_no_turns_renders_nothing(self):
         assert render_history([]) == []
+
+
+class EchoAgent:
+    """只实现 invoke 的替身：回答与摘要都是请求原文，记录每轮看到的历史。"""
+
+    def __init__(self):
+        self.seen: list[list[int]] = []
+
+    def invoke(self, state, config=None):
+        self.seen.append([t["number"] for t in state["history"]])
+        req = state["user_request"]
+        return {**state, "final_answer": req, "turn_summary": f"{req}的结论",
+                "failure": None, "episodes": []}
+
+
+class TestTurnsAreBounded:
+    """单个会话保留几轮由上下文预算推出：永远进不了提示词的轮次不留。"""
+
+    def _turns(self, n):
+        # 长短不一，使「连同更新的各轮放不下」发生在不同位置
+        return [turn(f"请求{i}" * (1 + i % 4), f"结论{i}" * (1 + i % 3), number=i + 1)
+                for i in range(n)]
+
+    def test_reachable_edges(self):
+        assert reachable([], 100) == 0
+        one = self._turns(1)
+        assert reachable(one, 0) == 1                 # 最新一轮总有紧凑形式可留
+        many = self._turns(6)
+        texts = [s.text for s in render_history(many)]
+        assert reachable(many, 10**6) == 6
+        assert reachable(many, len("\n\n".join(texts[-2:]))) == 2
+        assert reachable(many, len("\n\n".join(texts[-2:])) - 1) == 1
+
+    def test_pruning_never_changes_the_prompt(self, registry):
+        """削与不削，规划器拿到的提示词逐字相同：削掉的都是必然被丢弃的。"""
+        tools = _tools_section(registry)
+        goal = Section("用户目标", "用户目标：再订一次")
+        turns = self._turns(12)
+        history_limit = len("\n\n".join(s.text for s in render_history(turns))) // 2
+        pruned = turns[len(turns) - reachable(turns, history_limit):]
+        assert 1 < len(pruned) < len(turns), "用例前提：确有轮次被削、也有轮次留下"
+
+        def prompt(ts, limit):
+            try:
+                return fit([tools, *render_history(ts), goal], limit, len)[0]
+            except AgentError as e:
+                return e.code
+        for limit in range(0, history_limit + 1):
+            assert prompt(turns, limit) == prompt(pruned, limit), limit
+
+    def test_reachable_is_exactly_what_fit_keeps(self):
+        """上界是紧的：只有历史片段时，fit 留下的轮数恰好是 reachable 给出的轮数。
+        多削一轮会让本该出现的一轮消失，少削一轮则白占内存。"""
+        turns = self._turns(12)
+        total = len("\n\n".join(s.text for s in render_history(turns)))
+        for limit in range(0, total + 1):
+            try:
+                _, notes = fit(render_history(turns), limit, len)
+            except AgentError:
+                continue                  # 连最新一轮的紧凑形式都放不下
+            present = len(turns) - sum(n.endswith("已丢弃") for n in notes)
+            assert present == reachable(turns, limit), limit
+
+    def test_numbers_survive_pruning(self):
+        agent = EchoAgent()
+        session = Session(agent, history_limit=60)
+        for i in range(1, 9):
+            session.run(f"第{i}个请求")
+        numbers = [t["number"] for t in session.turns]
+        assert numbers[-1] == 8 and numbers == list(range(numbers[0], 9))
+        assert 1 < len(numbers) < 8
+        labels = [s.name for s in render_history(session.turns)]
+        assert labels[0] == f"对话历史·第 {numbers[0]} 轮"   # 编号不因前面被削而改变
+
+    def test_turn_count_stays_bounded_over_a_long_conversation(self):
+        """每轮渲染后至少有固定模板那么长，保留的轮数因此不超过 预算 / 模板长度 + 1。"""
+        session = Session(EchoAgent(), history_limit=200)
+        most = 0
+        for i in range(300):
+            session.run(f"请求{i}")
+            most = max(most, len(session.turns))
+        assert most <= 200 // len("上一轮\n  用户：\n  结论：") + 1
+
+    def test_without_a_limit_every_turn_is_kept(self):
+        session = Session(EchoAgent())
+        for i in range(20):
+            session.run(f"请求{i}")
+        assert len(session.turns) == 20
+
+    def test_clear_restarts_numbering(self):
+        session = Session(EchoAgent())
+        session.run("一")
+        session.clear()
+        session.run("二")
+        assert session.turns[0]["number"] == 1

@@ -457,3 +457,5 @@ class TestBuildRuntime:
                 assert f.result(WAIT)["failure"] is None
         assert len(probe.keys) == 4
         assert probe.peak.peak == 1        # 配额 1：两个请求合起来同一时刻也只有一个在飞
+        # 单个会话保留的轮次按这个模型的窗口推出
+        assert rt.session("A")._history_limit == llm.context_limit

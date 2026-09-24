@@ -127,6 +127,7 @@ class Anchor(TypedDict):
 class Turn(TypedDict):
     """对话的一轮。由 Session 记录并在下一轮填入 history，见 miagent.memory.session。"""
 
+    number: int                 # 这是对话的第几轮，从 1 起；更早的轮次被削掉后不变
     request: str
     answer: str
     summary: str                # 收尾产出的本轮摘要，下一轮规划看的就是它
