@@ -7,9 +7,9 @@ import pytest
 
 from miagent.graph import build_agent
 from miagent.llm import FakeLLM
-from miagent.protocol import ResourceBudget, TaskDispatchParams
-from miagent.runtime import (INFERENCE_SLOTS, MAX_INFLIGHT, Runtime, SlotPool,
-                             build_runtime, dispatch_result, request_key)
+from miagent.protocol import ConversationEndParams, ResourceBudget, TaskDispatchParams
+from miagent.runtime import (INFERENCE_SLOTS, MAX_IDLE_SESSIONS, MAX_INFLIGHT, Runtime,
+                             SlotPool, build_runtime, dispatch_result, request_key)
 from miagent.tools import ToolRegistry, ToolSource
 from miagent.tools.base import Tool
 
@@ -243,6 +243,88 @@ class TestRuntime:
     def test_default_inflight(self):
         rt = Runtime(StubAgent())
         assert rt.max_inflight == MAX_INFLIGHT == 10
+        rt.close()
+
+
+class TestSessionReclaim:
+    """会话回收：结束通知即回收；空闲会话超出上限时回收最久没用的。"""
+
+    def test_least_recently_used_idle_session_is_reclaimed(self):
+        agent = StubAgent()
+        with Runtime(agent, max_inflight=1, max_idle_sessions=2) as rt:
+            for s in ("s1", "s2", "s1", "s3"):   # s1 用过两次，s2 成了最久没用的
+                rt.submit(f"{s}-{agent.started.count(s)}", session=s).result(WAIT)
+            assert rt.sessions == 2
+            assert rt.session("s2") is None
+            assert rt.session("s1") is not None and rt.session("s3") is not None
+
+    def test_reclaimed_session_starts_fresh(self):
+        agent = StubAgent()
+        with Runtime(agent, max_inflight=1, max_idle_sessions=1) as rt:
+            rt.submit("a1", session="a").result(WAIT)
+            rt.submit("b1", session="b").result(WAIT)      # a 被挤出
+            rt.submit("a2", session="a").result(WAIT)
+        assert agent.seen_history["a2"] == []
+
+    def test_busy_or_queued_session_is_never_reclaimed(self):
+        agent = StubAgent()
+        gate = agent.gate("long")
+        with Runtime(agent, max_inflight=2, max_idle_sessions=0) as rt:
+            rt.submit("long", session="busy")
+            queued = rt.submit("next", session="busy")
+            rt.submit("quick", session="other").result(WAIT)
+            assert rt.session("other") is None               # 上限 0：用完即回收
+            assert rt.session("busy") is not None
+            gate.set()
+            queued.result(WAIT)
+        assert agent.seen_history["next"] == ["long"]        # 排队期间上文没丢
+        assert rt.sessions == 0
+
+    def test_end_reclaims_an_idle_session(self):
+        agent = StubAgent()
+        with Runtime(agent, max_inflight=1) as rt:
+            rt.submit("一", session="c").result(WAIT)
+            rt.end("c")
+            assert rt.sessions == 0
+            rt.submit("二", session="c").result(WAIT)
+        assert agent.seen_history["二"] == []
+
+    def test_end_while_in_flight_affects_only_later_requests(self):
+        agent = StubAgent()
+        gate = agent.gate("a")
+        with Runtime(agent, max_inflight=2) as rt:
+            rt.submit("a", session="c")
+            before = rt.submit("b", session="c")             # 结束前提交，属于旧对话
+            wait_until(lambda: agent.started == ["a"])
+            rt.end("c")
+            after = rt.submit("x", session="c")              # 结束后提交，新对话
+            gate.set()
+            before.result(WAIT), after.result(WAIT)
+        assert agent.seen_history["b"] == ["a"]
+        assert agent.seen_history["x"] == []
+        assert agent.started == ["a", "b", "x"]              # 同名仍按先后执行
+        assert [t["request"] for t in rt.session("c").turns] == ["x"]
+
+    def test_cancelled_request_still_releases_its_session(self):
+        agent = StubAgent()
+        gate = agent.gate("first")
+        with Runtime(agent, max_inflight=1, max_idle_sessions=0) as rt:
+            rt.submit("first", session="s0")
+            wait_until(lambda: agent.started == ["first"])
+            rt.submit("never", session="s1").cancel()
+            gate.set()
+        assert rt.sessions == 0
+
+    def test_conversation_end_notification(self):
+        agent = StubAgent()
+        with Runtime(agent, max_inflight=1) as rt:
+            rt.submit("一", session="conv-1").result(WAIT)
+            rt.end_conversation(ConversationEndParams(conversationId="conv-1"))
+            assert rt.session("conv-1") is None
+
+    def test_default_idle_limit(self):
+        rt = Runtime(StubAgent())
+        assert rt.max_idle_sessions == MAX_IDLE_SESSIONS == MAX_INFLIGHT
         rt.close()
 
 

@@ -18,6 +18,7 @@ from .errors import (
 from .messages import (
     PROTOCOL_VERSION,
     AgentMethod,
+    ConversationEndParams,
     JsonRpcError,
     JsonRpcNotification,
     JsonRpcRequest,
@@ -40,6 +41,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "AgentError",
     "AgentMethod",
+    "ConversationEndParams",
     "ErrorCode",
     "JsonRpcError",
     "JsonRpcNotification",

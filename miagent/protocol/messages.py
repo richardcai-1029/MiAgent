@@ -65,6 +65,7 @@ class AgentMethod(StrEnum):
     """
 
     TASK_DISPATCH = "miclaw/task.dispatch"         # 系统把一个用户请求派给 Agent
+    CONVERSATION_END = "miclaw/conversation.end"   # 通知：对话结束，Agent 可回收其上下文
 
 
 # ============================================================
@@ -185,6 +186,14 @@ class TaskDispatchParams(BaseModel):
     request: str = Field(description="用户请求原文")
     # 缺省按前台处理：系统没说明时，宁可让它占用资源，也不让一个可能正在等待的用户排在后面。
     priority: RequestPriority = RequestPriority.FOREGROUND
+
+
+class ConversationEndParams(BaseModel):
+    """miclaw/conversation.end 的通知参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversationId: str  # noqa: N815
 
 
 class TaskDispatchResult(BaseModel):

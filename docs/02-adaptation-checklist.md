@@ -4,7 +4,7 @@
 |---|---|
 | 基础框架 | LangGraph `>=1.2,<2.0`（实测通过 1.2.10、1.2.11） |
 | 目标生态 | MiClaw 系统级 Agent 生态 · MiMo 端侧大模型 |
-| 文档版本 | v3.3 |
+| 文档版本 | v3.4 |
 
 本清单记录已完成并经测试验证的改造项。每项均给出落地位置、验证方式与**框架侵入面**，可逐条核查。
 
@@ -33,6 +33,7 @@ LangGraph 的工具调用是进程内 Python 函数调用，不存在跨进程�
 | A-5 | 厂商扩展方法与标准方法无命名隔离 | 扩展方法统一 `miclaw/` 前缀，避免与未来标准 MCP 方法撞名 | `test_protocol.py::test_extensions_are_namespaced` | L0 |
 | A-6 | 无协议版本协商 | `initialize` 比对版本，不匹配返回 MC-2001 | `test_mock_server.py::test_version_mismatch` | L0 |
 | A-7 | 协议只有 Agent 调用系统的方向，系统把用户请求派给 Agent 的报文不存在；请求无优先级，多个请求同时到达时 Agent 无从区分谁更急 | 扩展 `miclaw/task.dispatch`（MiClaw → Agent）：对话标识、请求原文、请求优先级。优先级按「有没有人正在等这个回答」分为 `foreground` / `background` 两级而非数值，缺省按前台；响应只给回答与是否完成，AG-* 码不上网络。服务端受理的方法与 Agent 受理的方法分列两个枚举，反向发送返回 MC-2004。客户端接收服务端发起的请求需传输层分流，尚未实现 | `protocol/messages.py::AgentMethod` / `TaskDispatchParams` / `TaskDispatchResult`、`Runtime.dispatch`；`test_protocol.py::TestTaskDispatch`、`test_runtime.py::TestDispatch` | L0 |
+| A-8 | 系统无从告知 Agent 一段对话已结束，Agent 侧为对话保留的上下文只能一直留着 | 扩展 `miclaw/conversation.end` 通知（MiClaw → Agent，无回复），参数只有 `conversationId`；结束前已派发的请求照常执行完，此后同一标识视为新对话 | `protocol/messages.py::ConversationEndParams`、`Runtime.end_conversation`；`test_runtime.py::TestSessionReclaim` | L0 |
 
 ### B · 错误处理体系
 
@@ -58,6 +59,7 @@ LangGraph 面向云端设计，不存在内存配额、并发上限等概念。�
 | C-3 | 工具无资源画像，无法预判开销 | 工具申报 `estimated_memory_mb`，服务端执行前校验 | 超配额返回 MC-4001，见 `test_memory_limit` | L0 |
 | C-7 | `max_call_timeout_ms` 无执行机制：所有请求一律用连接级超时，一个工具卡住要拖到整条链路超时才被发现 | 工具调用改用配额下发的单次调用超时，其余请求仍用连接级超时；握手未完成时退回连接级 | `client.call_timeout`；`test_client.py::TestPerCallTimeout` | L0 |
 | C-6 | `max_concurrent_calls` 无执行机制 | 当前同步实现天然串行；如引入并发需加信号量，否则应移除该字段 | `scheduler` 按 `max_concurrent_calls` 限流单个请求一轮的 MiClaw 派发，超出者顺延；多个请求同时在飞时共用一个同容量、按优先级排队的调用槽（`runtime.SlotPool`），合计不超出配额；本地工具受 GIL 限制不设限 | L1 |
+| C-8 | 多请求运行时为每个对话保留一个会话，对话标识不断出现新值时常驻内存只增不减 | 收到对话结束通知即回收；空闲会话（无请求在飞、无排队）数超过 `max_idle_sessions`（默认同 `max_inflight`，暂定）时回收最久没用的；在飞或排队中的会话不回收。请求提交时即绑定会话对象，结束通知不影响已提交的请求；结果在会话状态登记之后才交付 | `runtime.Runtime._release` / `end`；`test_runtime.py::TestSessionReclaim` 8 条 | L0 |
 
 ### D · MiMo 模型接入
 
@@ -145,15 +147,15 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 41 | A 组全部、B 组全部、C-2、C-3、C-7、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、H-1、H-3 |
+| L0 | 43 | A 组全部、B 组全部、C-2、C-3、C-7、C-8、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、H-1、H-3 |
 | L1 | 5 | C-6、D-10、G-2、G-10、H-2 |
 | L2 | 2 | **G-5**、**G-11** |
 | L3 | 0 | — |
 
-合计 48 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
+合计 50 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
 B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增，
 D-6、D-7、D-8、D-9、D-10、G-9、G-10 为第 3 周新增，
-A-7、G-11、G-12 为多请求并发与调度优先级改造新增。
+A-7、A-8、C-8、G-11、G-12 为多请求并发与调度优先级改造新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，

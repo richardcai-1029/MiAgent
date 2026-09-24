@@ -73,7 +73,7 @@ JSON-RPC 2.0 定义三种报文，本规约不作扩展。
 
 ## 四、方法集
 
-共 9 个方法，其中 5 个为标准 MCP，4 个为 MiClaw 扩展。除 `miclaw/task.dispatch` 由 MiClaw 发给 Agent 外，其余均由 Agent 发给 MiClaw。
+共 10 个方法，其中 5 个为标准 MCP，5 个为 MiClaw 扩展。`miclaw/task.dispatch` 与 `miclaw/conversation.end` 由 MiClaw 发给 Agent，其余均由 Agent 发给 MiClaw。
 
 | method | 类型 | 允许调用的会话状态 |
 |---|---|---|
@@ -86,6 +86,7 @@ JSON-RPC 2.0 定义三种报文，本规约不作扩展。
 | `miclaw/agent.unregister` | MiClaw 扩展 | `registered` |
 | `miclaw/resource.query` | MiClaw 扩展 | `handshaked`、`registered` |
 | `miclaw/task.dispatch` | MiClaw 扩展，MiClaw → Agent | `registered` |
+| `miclaw/conversation.end` | MiClaw 扩展，MiClaw → Agent，通知 | `registered` |
 
 ### `initialize`
 
@@ -180,6 +181,14 @@ Agent 侧按优先级决定请求的准入顺序，以及在飞请求争用 MiCl
 服务端不受理此方法，Agent 反向发送时返回 `MC-2004`。
 
 **实现状态**：报文模型（`TaskDispatchParams` / `TaskDispatchResult`）与 Agent 侧受理（`Runtime.dispatch`）已实现。客户端接收服务端发起的请求需要传输层分流——同一条管道上既有自己请求的响应、又有对端发来的请求——尚未实现，与第七节并发调用所需的多路复用是同一项工作。
+
+### `miclaw/conversation.end`
+
+通知 Agent 一段对话已结束，无 `id`，Agent 不回复。参数：`conversationId`。
+
+Agent 为每段对话保留轮次记录，供下一轮承接上文。对话标识不断出现新值时，这些记录只增不减；系统知道对话何时结束（用户关闭对话界面、会话超时），据此通知 Agent 回收。结束前已派发的请求照常执行完；此后同一 `conversationId` 的请求视为一段新对话，看不到之前的上文。
+
+Agent 侧另有空闲会话数上限作兜底，系统不发此通知时常驻内存同样有界，见《Agent 架构设计》六之四。实现状态同 `miclaw/task.dispatch`。
 
 ### `ping`
 

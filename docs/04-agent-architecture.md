@@ -255,9 +255,11 @@ Tool
 
 ```
 miclaw/task.dispatch ──→ Runtime.dispatch(params)       对话标识 → 会话，协议优先级 → 运行时优先级
+miclaw/conversation.end → Runtime.end(conversation)      回收该会话
                          Runtime.submit(request, session, priority) → Future[AgentState]
   ├─ 会话内串行   同一会话的请求按提交先后逐个执行
   ├─ 准入         同时在飞的请求数 ≤ max_inflight，其余排队
+  ├─ 会话回收     结束通知即回收；空闲会话数 > max_idle_sessions 时回收最久没用的
   └─ 线程池执行   Session.run → graph.invoke
 共享资源（SlotPool，按优先级排队的计数信号量）
   ├─ MiClaw 调用槽   容量 = budget.max_concurrent_calls
@@ -267,6 +269,10 @@ miclaw/task.dispatch ──→ Runtime.dispatch(params)       对话标识 → �
 `build_runtime(llm, registry, budget)` 一次装好图与两个资源槽。手工装配时漏掉任何一处都不会报错，只会让并发超出配额。
 
 **会话内串行。** 下一轮要承接上一轮的结论（见上文对话历史），同一会话的两轮同时执行，后一轮就看不到前一轮。不同会话之间互不可见，可以并发。
+
+**会话回收。** 每个会话各持一份轮次记录，对话标识不断出现新值时常驻内存只增不减。两条回收途径：收到 `miclaw/conversation.end` 即回收；另外空闲会话（没有请求在飞、也没有排队）超过 `max_idle_sessions` 时，回收最久没用的——系统不发结束通知时常驻内存同样有界。在飞或排队中的会话从不回收，上文不会在一轮进行中丢失。请求提交时即绑定当时的会话对象：结束通知到达前已提交的请求仍在原会话上执行完，之后同名的请求从一个新会话开始。被回收的会话再来请求时规划器少了上文，执行的正确性不受影响。`Future` 在会话状态登记完之后才交付结果，调用方拿到结果时回收已经落定。
+
+`max_idle_sessions` 默认与 `max_inflight` 相同（10），为暂定值：尚无每个会话常驻内存的实测，先让空闲会话的常驻量与在飞请求保持同一量级，实测后按设备内存校准。单个会话内的轮次数仍不设上限，进入提示词的部分由上下文预算决定（见对话历史）。
 
 **配额由所有请求共用。** `max_concurrent_calls` 按会话下发，`max_concurrent_miclaw` 只约束单个请求一轮派发多少；两个请求各自按配额派发，合起来就是两倍。MiClaw 执行节点在调用期间持有共享池里的一个槽，重试的退避等待不占槽。端侧推理通常只有一个实例，模型调用经 `LLM._guarded` 同样在共享池里排队；`elapsed_ms` 从拿到槽后开始计，不含排队。
 

@@ -10,6 +10,7 @@ from miagent.protocol import (
     PROTOCOL_VERSION,
     AgentError,
     AgentMethod,
+    ConversationEndParams,
     RequestPriority,
     TaskDispatchParams,
     TaskDispatchResult,
@@ -118,6 +119,11 @@ class TestTaskDispatch:
     def test_conversation_is_required(self):
         with pytest.raises(ValidationError):
             TaskDispatchParams.model_validate({"request": "r"})
+
+    def test_conversation_end_is_strict(self):
+        assert ConversationEndParams.model_validate({"conversationId": "c"}).conversationId == "c"
+        with pytest.raises(ValidationError):
+            ConversationEndParams.model_validate({"conversationId": "c", "reason": "x"})
 
     def test_result_carries_no_error_code(self):
         """AG-* 码不上网络：响应只说完成与否，说明在 answer 里。"""
