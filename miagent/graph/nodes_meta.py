@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from ..llm import LLM
 from ..tools import ToolRegistry
+
+if TYPE_CHECKING:
+    from ..runtime.slots import SlotPool
 
 
 @dataclass
@@ -22,6 +25,12 @@ class Deps:
     # 本地工具不受此限：它们是 CPU 密集的，受 GIL 限制并发无收益，
     # 也不占用系统侧资源配额。
     max_concurrent_miclaw: int = 2
+
+    # MiClaw 调用槽，多个请求同时在飞时共用（见 miagent.runtime）。
+    # max_concurrent_miclaw 只约束单个请求一轮派发多少，几个请求合起来
+    # 仍可能超出配额；配额是按会话下发的，要由所有请求共用的这个池兜住。
+    # 为 None 时不仲裁，适用于同一时刻只有一个请求的用法。
+    miclaw_slots: SlotPool | None = None
 
     # 重试前的等待时长。RetryPolicy.BACKOFF 要求"退避后重试"，立即重发
     # 对传输抖动与资源占用这两类失败几乎没有意义 —— 状况还没来得及改变。

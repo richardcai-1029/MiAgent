@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import TYPE_CHECKING
 
 from langgraph.graph import END, START, StateGraph
 
@@ -13,14 +14,21 @@ from .routers import (route_after_evaluator, route_after_goal_verifier,
                       route_after_scheduler)
 from .state import AgentState
 
+if TYPE_CHECKING:
+    from ..runtime.slots import SlotPool
+
 
 def build_agent(llm: LLM, registry: ToolRegistry,
                 max_concurrent_miclaw: int = 2, retry_delay_ms: int = 200,
-                verify: bool = True, **compile_kwargs):
+                verify: bool = True, miclaw_slots: SlotPool | None = None,
+                **compile_kwargs):
     """构建 Agent 图。
 
     max_concurrent_miclaw 应取自握手时下发的 ResourceBudget.max_concurrent_calls，
     限制同一轮并行派发的 MiClaw 调用数（清单 C-6）。本地工具不受此限。
+
+    miclaw_slots 是多个请求共用的 MiClaw 调用槽，容量取 max_concurrent_calls；
+    同一个编译好的图被多个请求同时 invoke 时必须给（见 miagent.runtime）。
 
     retry_delay_ms 是重试前的退避时长，默认值无外部依据，见 Deps 的说明。
 
@@ -35,7 +43,8 @@ def build_agent(llm: LLM, registry: ToolRegistry,
     """
     deps = nodes.Deps(llm=llm, registry=registry,
                       max_concurrent_miclaw=max_concurrent_miclaw,
-                      retry_delay_ms=retry_delay_ms, verify=verify)
+                      retry_delay_ms=retry_delay_ms, verify=verify,
+                      miclaw_slots=miclaw_slots)
     bind = lambda fn, **kw: partial(fn, deps=deps, **kw)  # noqa: E731
 
     g = StateGraph(AgentState)

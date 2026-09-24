@@ -25,6 +25,7 @@ LIGHT_MODULES = [
     "miagent.graph.state",
     "miagent.graph.schema",
     "miagent.memory",       # 情景记忆是纯函数
+    "miagent.runtime",      # 多请求运行时只用标准库
 ]
 
 FORBIDDEN = ["langgraph", "langchain_core", "langsmith", "requests",

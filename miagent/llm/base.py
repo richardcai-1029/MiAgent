@@ -17,12 +17,16 @@ from __future__ import annotations
 import json
 import time
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable, Literal, TypeVar
+from typing import TYPE_CHECKING, Callable, Literal, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from ..protocol import AgentError, ErrorCode
+
+if TYPE_CHECKING:
+    from ..runtime.slots import SlotPool
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -154,6 +158,11 @@ class LLM(ABC):
     # 为 False 时，complete_structured 退化为「prompt 注入 schema + 校验 + 自修复」。
     supports_native_structured_output: bool = False
 
+    # 推理资源槽。多个请求共用一个模型实例时，由它决定同时进行几次推理、
+    # 谁先谁后（见 miagent.runtime）；为 None 时不仲裁。容量取部署侧
+    # 实际能同时服务的推理数。
+    slots: SlotPool | None = None
+
     def __init__(self) -> None:
         self.call_count = 0
         self.total_elapsed_ms = 0.0
@@ -187,12 +196,14 @@ class LLM(ABC):
                 detail={"prompt_chars": prompt_chars, "limit": self.context_limit},
             )
 
-        started = time.perf_counter()
-        content = call()
-        elapsed = (time.perf_counter() - started) * 1000
+        # 计时从拿到槽之后开始：elapsed_ms 衡量的是推理耗时，不含排队。
+        with self.slots.hold() if self.slots else nullcontext():
+            started = time.perf_counter()
+            content = call()
+            elapsed = (time.perf_counter() - started) * 1000
 
-        self.call_count += 1
-        self.total_elapsed_ms += elapsed
+            self.call_count += 1
+            self.total_elapsed_ms += elapsed
         return LLMResponse(content=content, elapsed_ms=round(elapsed, 2),
                            prompt_chars=prompt_chars, model=self.name)
 

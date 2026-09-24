@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from typing import Any
 
 from pydantic import BaseModel
@@ -276,7 +277,9 @@ def execute(payload: dict[str, Any], deps: Deps, source: ToolSource) -> dict[str
     if attempt > 1:
         deps.sleep(deps.retry_delay_ms / 1000)
 
-    result = deps.registry.invoke(task["required_tool"], task["arguments"])
+    slots = deps.miclaw_slots if source is ToolSource.MICLAW else None
+    with slots.hold() if slots else nullcontext():
+        result = deps.registry.invoke(task["required_tool"], task["arguments"])
 
     outcome = TaskOutcome(
         task_id=task["id"], tool=task["required_tool"], ok=not result.is_error,
