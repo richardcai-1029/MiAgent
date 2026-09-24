@@ -43,10 +43,8 @@ class Settlement:
     new_episodes: list[Episode]     # 本次新增的记录，节点写回 episodes
     episodes: list[Episode]         # 含新增在内的全量视图，供 accept 使用
     keep: dict[str, Task]           # 可供新任务引用的已完成任务
-    done_text: str                  # 提示词片段：已完成
-    failed_text: str                # 提示词片段：失败
-    n_done: int                     # 去重后的成功记录数，供紧凑形式使用
-    n_failed: int
+    done: list[episodic.Line]       # 提示词：已完成，每条记录一行，已去重
+    failed: list[episodic.Line]     # 提示词：失败
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,7 @@ class Acceptance:
 class Survey:
     """只读的执行明细快照。"""
 
-    history: list[str]              # 每任务一行
+    history: list[episodic.Line]    # 每任务一行
     n_settled: int                  # 已进入情景记忆的记录数
 
 
@@ -75,7 +73,7 @@ class Closing:
     tasks: dict[str, Task]          # 级联失败之后的任务图
     new_episodes: list[Episode]     # 本次新增的记录，节点写回 episodes
     summary: dict[str, Any]         # 执行概况
-    history: list[str]              # 执行明细，每任务一行
+    history: list[episodic.Line]    # 执行明细，每任务一行
 
 
 def settle(tasks: dict[str, Task], episodes: list[Episode],
@@ -87,14 +85,11 @@ def settle(tasks: dict[str, Task], episodes: list[Episode],
     ended = replan_count
     new = episodic.settle(tasks, episodes, ended)
     full = [*episodes, *new]
-    done_text, failed_text = episodic.render(full, ended)
-    shown = episodic.dedupe(full)
-    n_done = sum(1 for e in shown if e["ok"])
+    done, failed = episodic.render(full, ended)
     return Settlement(
         generation=ended + 1, new_episodes=new, episodes=full,
         keep={tid: t for tid, t in tasks.items() if t["status"] is TaskStatus.DONE},
-        done_text=done_text, failed_text=failed_text,
-        n_done=n_done, n_failed=len(shown) - n_done,
+        done=done, failed=failed,
     )
 
 

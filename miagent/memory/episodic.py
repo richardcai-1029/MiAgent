@@ -7,6 +7,8 @@
 
 去重与降级都发生在**渲染**时，不改动状态：episodes 字段只增不减，
 同一份记录在不同时刻可以渲染成不同详略，规则确定、可穷举测试。
+渲染按条给出两种形式（见 Line）：带结果原文的完整形式，与去掉原文的简要形式。
+提示词放不下时用哪一种，由上下文预算逐条决定，不在这里决定。
 
 Episode 的类型定义在 graph.state（它是 State 的元素）；本模块是它的行为。
 节点不直接调用这里的函数 —— 结算的步骤由 ledger 编排，这里是账本的内部接缝。
@@ -18,13 +20,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from ..graph import dag
 from ..graph.state import Episode, Task, TaskStatus
 
-__all__ = ["Episode", "args_digest", "settle", "dedupe", "repeats_calls",
+__all__ = ["Episode", "Line", "args_digest", "settle", "dedupe", "repeats_calls",
            "render", "history", "summarize"]
+
+
+@dataclass(frozen=True)
+class Line:
+    """一条记录渲染出的一行。
+
+    brief 去掉了结果原文，只留 id、描述与成败 —— 这是引用它（`$from`）、
+    交代它做过什么的最低限度。full 本身就不带结果原文时，两者相同。
+    """
+
+    task_id: str
+    full: str
+    brief: str
 
 
 def args_digest(arguments: dict[str, Any]) -> str:
@@ -95,49 +111,59 @@ def repeats_calls(new_tasks: dict[str, Task], episodes: list[Episode]) -> bool:
                for t in new_tasks.values())
 
 
-def render(episodes: list[Episode], generation: int) -> tuple[str, str]:
-    """渲染成重规划提示词里的「已完成」与「失败」两段。
+def render(episodes: list[Episode], generation: int) -> tuple[list[Line], list[Line]]:
+    """渲染成重规划提示词里的「已完成」与「失败」两组，每条记录一行。
 
-    详略按代降级：本轮（generation 相同）的记录带结果原文；更早的只剩
-    id 与描述 —— 早先几轮的结果在当时的重规划里已经被看过，此后模型只需
+    详略按代降级：本轮（generation 相同）的记录完整形式带结果原文；更早的
+    只剩 id 与描述 —— 早先几轮的结果在当时的重规划里已经被看过，此后模型只需
     知道那个 id 存在、做过什么，以便用 `$from` 引用。
     """
-    done_lines: list[str] = []
-    failed_lines: list[str] = []
+    done: list[Line] = []
+    failed: list[Line] = []
     for e in dedupe(episodes):
-        current = e["generation"] == generation
-        if e["ok"]:
-            tail = f" → {e['result']}" if current else f"（第 {e['generation']} 轮）"
-            done_lines.append(f"  {e['task_id']}（已完成）: {e['description']}{tail}")
+        tid, desc = e["task_id"], e["description"]
+        if e["generation"] != generation:
+            if e["ok"]:
+                line = f"  {tid}（已完成）: {desc}（第 {e['generation']} 轮）"
+            else:
+                line = f"  {tid}: {desc} → 失败 {e['error']}（第 {e['generation']} 轮）"
+            (done if e["ok"] else failed).append(Line(tid, line, line))
+        elif e["ok"]:
+            done.append(Line(tid, f"  {tid}（已完成）: {desc} → {e['result']}",
+                             f"  {tid}（已完成）: {desc}（结果从略）"))
         else:
-            tail = (f" → 失败 {e['error']}：{e['result']}" if current
-                    else f" → 失败 {e['error']}（第 {e['generation']} 轮）")
-            failed_lines.append(f"  {e['task_id']}: {e['description']}{tail}")
-    return ("\n".join(done_lines) or "  （无）", "\n".join(failed_lines) or "  （无）")
+            failed.append(Line(tid, f"  {tid}: {desc} → 失败 {e['error']}：{e['result']}",
+                               f"  {tid}: {desc} → 失败 {e['error']}（详情从略）"))
+    return done, failed
 
 
-def history(episodes: list[Episode], tasks: dict[str, Task]) -> list[str]:
-    """完整的执行明细，供收尾使用：情景记忆在前，仍在图里且未记录的任务在后。
+def history(episodes: list[Episode], tasks: dict[str, Task]) -> list[Line]:
+    """完整的执行明细，供完成校验与收尾使用：情景记忆在前，仍在图里且未记录的任务在后。
 
     后者出现在中止路径上 —— 预算耗尽、死锁时，图里还留着没跑完的任务，
     以及被级联标记为失败却没经过结算的任务。
     """
-    lines = [
-        f"  {e['task_id']}: {e['description']} → "
-        + (f"成功：{e['result']}" if e["ok"] else f"失败（{e['error']}）：{e['result']}")
-        for e in episodes
-    ]
+    lines = [_history_line(e["task_id"], e["description"], e["ok"], e["error"], e["result"])
+             for e in episodes]
     recorded = {e["task_id"] for e in episodes}
     for tid, t in tasks.items():
         if tid in recorded:
             continue
-        if t["status"] is TaskStatus.DONE:
-            lines.append(f"  {tid}: {t['description']} → 成功：{t['result']}")
-        elif t["status"] is TaskStatus.FAILED:
-            lines.append(f"  {tid}: {t['description']} → 失败（{t['error']}）：{t['result']}")
+        if t["status"] in (TaskStatus.DONE, TaskStatus.FAILED):
+            lines.append(_history_line(tid, t["description"], t["status"] is TaskStatus.DONE,
+                                       t["error"], t["result"]))
         else:
-            lines.append(f"  {tid}: {t['description']} → 未执行（{t['status']}）")
+            line = f"  {tid}: {t['description']} → 未执行（{t['status']}）"
+            lines.append(Line(tid, line, line))
     return lines
+
+
+def _history_line(tid: str, description: str, ok: bool,
+                  error: str | None, result: str | None) -> Line:
+    head = f"  {tid}: {description} → "
+    if ok:
+        return Line(tid, head + f"成功：{result}", head + "成功（结果从略）")
+    return Line(tid, head + f"失败（{error}）：{result}", head + f"失败（{error}，详情从略）")
 
 
 def summarize(tasks: dict[str, Task], episodes: list[Episode]) -> dict[str, Any]:

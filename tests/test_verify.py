@@ -292,6 +292,41 @@ class TestResultVerifier:
         out = verify_results(s, self._deps(registry, llm))
         assert [r["task_id"] for r in out["reviews"]] == ["t2"]
 
+    def _two(self, first, second):
+        t1 = new_task("t1", "回显 A", "echo", {"text": "A"})
+        t2 = new_task("t2", "回显 A", "echo", {"text": "B"})
+        s = initial_state("回显 A")
+        s["tasks"] = {"t1": t1, "t2": t2}
+        s["dispatch"] = [{"task": t1, "route": "local"}, {"task": t2, "route": "local"}]
+        s["outcomes"] = [outcome("t1", content=first), outcome("t2", content=second)]
+        return s
+
+    def test_oversized_item_is_left_out_the_rest_are_reviewed(self, registry):
+        """放不下的那项整项不交给模型、按原判定处理；其余项照常校验。
+        模型从不看到被截短或去掉结果的记录。"""
+        llm = FakeLLM([reviews(reject("t2", "回显的是 B"))])
+        out = verify_results(self._two("X" * 20000, "B"), self._deps(registry, llm))
+        body = llm.seen[-1][1].content
+        assert "任务 t1" not in body and "X" * 100 not in body
+        assert "任务 t2" in body
+        assert [r["task_id"] for r in out["reviews"]] == ["t2"]
+        assert "1 项放不下" in out["trace"][0]
+
+    def test_left_out_item_cannot_be_judged(self, registry):
+        """schema 只收留下的项：模型对没看到的任务下判定，解析阶段就拒掉。"""
+        llm = FakeLLM(responder=lambda _m: reviews(reject("t1", "没看到也判")))
+        out = verify_results(self._two("X" * 20000, "B"), self._deps(registry, llm))
+        assert "reviews" not in out and "校验未完成" in out["trace"][0]
+
+    def test_nothing_fits_means_no_model_call(self, registry):
+        def must_not_be_called(_messages):
+            raise AssertionError("没有可交给模型的待校验项时不应该调模型")
+
+        llm = FakeLLM(responder=must_not_be_called)
+        out = verify_results(self._two("X" * 20000, "Y" * 20000), self._deps(registry, llm))
+        assert "reviews" not in out
+        assert "待校验项都放不下" in out["trace"][0]
+
     def test_a_verdict_for_another_task_is_rejected_at_parsing(self, registry):
         """task_id 收进 enum：判定挂错任务比判错更难察觉，在解析阶段就拒掉。"""
         llm = FakeLLM(responder=lambda _m: reviews(reject("t9", "不存在的任务")))

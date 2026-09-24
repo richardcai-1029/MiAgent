@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel
 
 from ..llm import system, user
-from ..llm.context import Section, fit
+from ..llm.context import Section, choose, fit, join
 from ..memory import anchor as anchor_mod, ledger
+from ..memory.episodic import Line
 from ..memory.session import render_history
 from ..protocol import AgentError, ErrorCode, RetryPolicy, describe
 from ..tools import ToolRegistry, ToolSource
@@ -121,7 +122,8 @@ def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
     return tasks, notes
 
 
-def _tools_section(registry: ToolRegistry, names: set[str] | None = None) -> Section:
+def _tools_section(registry: ToolRegistry, names: set[str] | None = None,
+                   priority: int = 1) -> Section:
     """工具描述：预算不够时削减为只剩工具名。
 
     完整 schema 是规划质量的主要输入，但窗口触顶时保留工具名，
@@ -135,7 +137,7 @@ def _tools_section(registry: ToolRegistry, names: set[str] | None = None) -> Sec
     return Section(
         "工具描述",
         f"可用工具：\n{schemas}",
-        priority=1,
+        priority=priority,
         compact="可用工具：" + "、".join(t.name for t in tools),
     )
 
@@ -143,6 +145,20 @@ def _tools_section(registry: ToolRegistry, names: set[str] | None = None) -> Sec
 def _trace_trim(notes: list[str]) -> str:
     """把削减说明拼进 trace。裁掉了什么必须能看见。"""
     return f"（上下文削减：{'，'.join(notes)}）" if notes else ""
+
+
+def _records(title: str, lines: list[Line], priority: int,
+             empty: str = "  （无）") -> list[Section]:
+    """执行记录按条成段：标题一段，每条记录一段。
+
+    放不下时逐条换成去掉结果原文的简要形式，最长的先换（见 context.choose）——
+    一条结果超长只让它自己降级，其余记录的结论原样留在提示词里。
+    简要形式是 id 与描述，是引用它、交代它的最低限度，因此不再往下削；
+    简要形式并不更短的记录（本身不带结果原文，或结果极短）保持原样。
+    """
+    return [Section(title, f"{title}：" + ("" if lines else f"\n{empty}")),
+            *(Section(f"{title}·{line.task_id}", line.full, priority=priority,
+                      compact=line.brief) for line in lines)]
 
 
 # ============================================================
@@ -305,18 +321,35 @@ def execute(payload: dict[str, Any], deps: Deps, source: ToolSource) -> dict[str
 # 两个校验节点共用的取数与调用。判定的边界写在 verify.py，这里只负责
 # 把要校验的东西拼成提示词、把模型的回答取回来。
 #
-# ★ 校验的输入片段一律不可裁（priority 0）：基于残缺记录做出的校验结论，
-#   错在「把做成了的事判成没做成」这一侧，比不校验更糟。放不下就不校验，
-#   由调用方按 AG-3001 退回原判定。可裁的只有工具描述 —— 少了它至多是
-#   给不出修正参数，判定本身不受影响。
+# ★ 校验不看残缺的记录：基于残缺记录做出的校验结论，错在「把做成了的事
+#   判成没做成」这一侧，比不校验更糟。因此记录只有「整条给模型看」与
+#   「整条不看」两种状态，从不换成去掉结果原文的形式：
+#     · 结果校验逐项独立，放不下的那一项整项不交给模型，按原判定处理，
+#       其余项照常校验；
+#     · 完成校验要看全部记录才能下结论，执行记录不可裁，放不下就整个不校验。
+#   不可裁的部分本身放不下时，由调用方按 AG-3001 退回原判定。工具描述先于待校验项削减 ——
+#   少了它至多是给不出修正参数，判定本身不受影响。
 
 
-def _review(deps: Deps, role: str, sections: list[Section],
-            model: type[BaseModel]) -> tuple[BaseModel, list[str]]:
+Chosen = dict[str, str | None]    # 片段名 → 采用的文本，None 表示已丢弃
+
+
+def _review(deps: Deps, role: str, sections: list[Section], model: type[BaseModel],
+            narrow: Callable[[Chosen], type[BaseModel] | None] | None = None,
+            ) -> tuple[BaseModel | None, Chosen, list[str]]:
+    """拼提示词、调模型，返回判定、各片段的取舍（见 context.choose）与削减说明。
+
+    narrow 给定时按留下的片段收紧 schema：返回 None 表示没有可交给模型的内容，
+    此时不调模型，判定为 None。预算按 model 的 schema 留 —— 收紧后的 schema
+    只会更短。
+    """
     schema_json = json.dumps(model.model_json_schema(), ensure_ascii=False)
     reserve = deps.llm.estimate(schema_json) + deps.llm.estimate(role)
-    body, notes = fit(sections, deps.llm.context_limit - reserve, deps.llm.estimate)
-    return deps.llm.complete_structured([system(role), user(body)], model), notes
+    chosen, notes = choose(sections, deps.llm.context_limit - reserve, deps.llm.estimate)
+    final = narrow(chosen) if narrow is not None else model
+    if final is None:
+        return None, chosen, notes
+    return deps.llm.complete_structured([system(role), user(join(chosen))], final), chosen, notes
 
 
 _RESULT_VERIFIER_ROLE = (
@@ -330,19 +363,33 @@ _RESULT_VERIFIER_ROLE = (
 )
 
 
-def _review_items(state: AgentState, pending: list[TaskOutcome]) -> str:
-    """待校验清单。参数取实际传入工具的那一份（引用已求值），
-    否则模型看到的是 `$from` 而不是工具真正收到的东西。"""
+def _review_items(state: AgentState, pending: list[TaskOutcome]) -> list[Section]:
+    """待校验清单，每项一段，放不下的项整项丢弃（见上方 ★）。
+
+    参数取实际传入工具的那一份（引用已求值），否则模型看到的是 `$from`
+    而不是工具真正收到的东西。
+    """
     dispatched = {d["task"]["id"]: d["task"] for d in state.get("dispatch") or []}
-    blocks = []
+    sections = [Section("待校验", "待校验的执行结果：")]
     for o in pending:
         task = dispatched.get(o["task_id"]) or state["tasks"][o["task_id"]]
         args = json.dumps(task["arguments"], ensure_ascii=False)
         outcome = (f"  执行结果：{o['content']}" if o["ok"]
                    else f"  调用失败：{o['content']}")
-        blocks.append(f"任务 {o['task_id']}：{task['description']}\n"
-                      f"  调用：{o['tool']}，参数 {args}\n{outcome}")
-    return "\n".join(blocks)
+        sections.append(Section(_review_item(o["task_id"]),
+                                f"任务 {o['task_id']}：{task['description']}\n"
+                                f"  调用：{o['tool']}，参数 {args}\n{outcome}",
+                                priority=1))
+    return sections
+
+
+def _review_item(task_id: str) -> str:
+    return f"待校验·{task_id}"
+
+
+def _reviewed(pending: list[TaskOutcome], chosen: Chosen) -> list[TaskOutcome]:
+    """放得下、交给了模型的待校验项。"""
+    return [o for o in pending if chosen[_review_item(o["task_id"])] is not None]
 
 
 def verify_results(state: AgentState, deps: Deps) -> dict[str, Any]:
@@ -358,21 +405,35 @@ def verify_results(state: AgentState, deps: Deps) -> dict[str, Any]:
         return {"trace": [f"verifier: 跳过结果校验（{why}）"]}
 
     tools = {o["tool"] for o in pending}
+    sections = [
+        Section("用户目标", f"用户目标：{state['user_request']}"),
+        _tools_section(deps.registry, tools, priority=2),
+        *_review_items(state, pending),
+        Section("要求", "请逐条判断结果是否达成了该任务要做的事。"),
+    ]
+
+    def narrow(chosen: Chosen) -> type[BaseModel] | None:
+        kept = _reviewed(pending, chosen)
+        return result_review_model_for([o["task_id"] for o in kept]) if kept else None
+
     try:
-        batch, notes = _review(deps, _RESULT_VERIFIER_ROLE, [
-            Section("用户目标", f"用户目标：{state['user_request']}"),
-            _tools_section(deps.registry, tools),
-            Section("待校验", f"待校验的执行结果：\n{_review_items(state, pending)}"),
-            Section("要求", "请逐条判断结果是否达成了该任务要做的事。"),
-        ], result_review_model_for([o["task_id"] for o in pending]))
+        batch, chosen, notes = _review(
+            deps, _RESULT_VERIFIER_ROLE, sections,
+            result_review_model_for([o["task_id"] for o in pending]), narrow)
     except AgentError as e:
         # 校验不可用（窗口放不下、输出始终不合 schema、模型不可达）时退回原判定：
         # 校验只收紧不放宽，因此它缺席只是回到没有语义校验的判定，不会误伤。
         return {"trace": [f"verifier: 校验未完成（{e.code}），本轮按原判定处理"]}
 
-    reviews, lines = _accept_reviews(state, deps, batch, pending)
+    if batch is None:
+        return {"trace": ["verifier: 待校验项都放不下，本轮按原判定处理" + _trace_trim(notes)]}
+
+    kept = _reviewed(pending, chosen)
+    reviews, lines = _accept_reviews(state, deps, batch, kept)
+    skipped = len(pending) - len(kept)
     return {"reviews": reviews,
-            "trace": [f"verifier: 校验 {len(pending)} 项 → {'；'.join(lines)}"
+            "trace": [f"verifier: 校验 {len(kept)} 项 → {'；'.join(lines)}"
+                      + (f"；{skipped} 项放不下，按原判定处理" if skipped else "")
                       + _trace_trim(notes)]}
 
 
@@ -428,9 +489,10 @@ def verify_goal(state: AgentState, deps: Deps) -> dict[str, Any]:
 
     s = ledger.survey(state["tasks"], state["episodes"])
     try:
-        review, notes = _review(deps, _GOAL_VERIFIER_ROLE, [
+        review, _, notes = _review(deps, _GOAL_VERIFIER_ROLE, [
             anchor_mod.render(state["anchor"]),
-            Section("执行记录", "本轮执行记录：\n" + ("\n".join(s.history) or "  （无）")),
+            Section("执行记录", "本轮执行记录：\n"
+                    + ("\n".join(line.full for line in s.history) or "  （无）")),
             Section("要求", "请判断用户目标是否已经达成。"),
         ], GoalReview)
     except AgentError as e:
@@ -574,12 +636,10 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
                 anchor_mod.render(state["anchor"]),
                 _tools_section(deps.registry),
                 # 已完成的结果原文最先被削减：重规划真正需要的是「哪条路走不通」，
-                # 已完成部分只要知道有多少即可，具体结果下游任务可以再引用。
-                Section("已完成", f"已完成：\n{s.done_text}", priority=3,
-                        compact=f"已完成 {s.n_done} 个任务（结果从略）"),
+                # 已完成部分只要知道 id 与做过什么，具体结果下游任务可以再引用。
+                *_records("已完成", s.done, 3),
                 # 失败信息是重规划的主要依据，比已完成结果后削减。
-                Section("失败", f"失败：\n{s.failed_text}", priority=2,
-                        compact=f"有 {s.n_failed} 个任务失败（详情从略）"),
+                *_records("失败", s.failed, 2),
                 Section("要求", "请给出剩余任务。"),
             ],
             prefix=f"r{s.generation}_",
@@ -621,8 +681,6 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
     c = ledger.close(state["tasks"], state["episodes"], state["replan_count"])
     summary = c.summary
 
-    detail = "\n".join(c.history) or "  （未执行任何任务）"
-
     if state.get("failure"):
         # 带上错误码的中文说明：模型只看到 AG-1001 这样的码时会自行猜测原因
         # （实测编出「请检查网络」），说明来自协议层的同一张表，不另写一份。
@@ -642,10 +700,9 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
     try:
         body, notes = fit([
             Section("用户目标", f"用户目标：{state['user_request']}"),
-            # 执行明细可能很长；削减后只剩成败计数，仍足以给出一句可用的回答。
-            Section("执行情况", f"执行情况：\n{detail}", priority=2,
-                    compact=f"执行情况：成功 {len(summary['completed'])} 个、"
-                            f"失败 {len(summary['failed'])} 个（明细从略）"),
+            # 执行明细可能很长。逐条削减，超长的结果先让位：其余记录的结论还在，
+            # 回答与本轮摘要才写得出具体内容 —— 摘要是下一轮唯一能承接的上文。
+            *_records("执行情况", c.history, 2, empty="  （未执行任何任务）"),
             Section("要求", ask),
         ], deps.llm.context_limit - reserve, deps.llm.estimate)
         output = deps.llm.complete_structured([system(role), user(body)], FinalOutput)

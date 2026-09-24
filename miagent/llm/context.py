@@ -41,11 +41,16 @@ class Section:
     compact: str | None = None     # 削减后的替代形式；None 表示整段丢弃
 
 
-def fit(sections: list[Section], limit: int, estimate: Estimator) -> tuple[str, list[str]]:
-    """把片段拼成不超过 limit 的提示词，返回文本与削减说明。
+def choose(sections: list[Section], limit: int,
+           estimate: Estimator) -> tuple[dict[str, str | None], list[str]]:
+    """决定每个片段最终用哪种形式，返回 {片段名: 文本} 与削减说明。
+
+    文本为 None 表示该片段已丢弃。拼接交给 join；需要知道「哪些片段留下了」
+    的调用方（比如只能对留下的记录下判定）直接读这个映射。
 
     削减顺序：优先级大的先削减；同优先级时先削减更长的那个 —— 同样是削减
     一个片段，先削减长的更快腾出空间，削减的总片段数也就更少。
+    紧凑形式不比原文短的片段跳过，保持原样。
 
     不可裁的片段本身就超出预算时抛 AG-3001。此时它表示的是「这个请求在这个
     模型上放不下」，而不是「上下文管理没做」。
@@ -54,7 +59,7 @@ def fit(sections: list[Section], limit: int, estimate: Estimator) -> tuple[str, 
     notes: list[str] = []
 
     def total() -> int:
-        return estimate(_join(chosen))
+        return estimate(join(chosen))
 
     reducible = sorted(
         (s for s in sections if s.priority > 0),
@@ -65,6 +70,8 @@ def fit(sections: list[Section], limit: int, estimate: Estimator) -> tuple[str, 
     for section in reducible:
         if total() <= limit:
             break
+        if section.compact is not None and estimate(section.compact) >= estimate(section.text):
+            continue            # 紧凑形式并不更短，换上它腾不出空间
         chosen[section.name] = section.compact
         notes.append(f"{section.name}→" + ("紧凑形式" if section.compact else "已丢弃"))
 
@@ -75,8 +82,15 @@ def fit(sections: list[Section], limit: int, estimate: Estimator) -> tuple[str, 
             detail={"required": total(), "limit": limit,
                     "kept": [n for n, v in chosen.items() if v is not None]},
         )
-    return _join(chosen), notes
+    return chosen, notes
 
 
-def _join(chosen: dict[str, str | None]) -> str:
+def fit(sections: list[Section], limit: int, estimate: Estimator) -> tuple[str, list[str]]:
+    """把片段拼成不超过 limit 的提示词，返回文本与削减说明。规则见 choose。"""
+    chosen, notes = choose(sections, limit, estimate)
+    return join(chosen), notes
+
+
+def join(chosen: dict[str, str | None]) -> str:
+    """按片段原有顺序拼接，跳过已丢弃的。"""
     return SEPARATOR.join(v for v in chosen.values() if v)

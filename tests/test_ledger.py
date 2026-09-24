@@ -60,13 +60,14 @@ class TestSettle:
     def test_current_round_renders_results_older_rounds_only_ids(self):
         s0 = ledger.settle({"t1": done("t1", "R1", text="a")}, [], 0)
         s1 = ledger.settle({"t2": done("t2", "R2", text="b")}, s0.episodes, 1)
-        assert "R2" in s1.done_text
-        assert "R1" not in s1.done_text and "t1" in s1.done_text
+        shown = "\n".join(line.full for line in s1.done)
+        assert "R2" in shown
+        assert "R1" not in shown and "t1" in shown
 
     def test_counts_are_deduped_by_call(self):
         s0 = ledger.settle({"t1": failed("t1", name="A")}, [], 0)
         s1 = ledger.settle({"r1_t1": done("r1_t1", name="A")}, s0.episodes, 1)
-        assert (s1.n_done, s1.n_failed) == (1, 0)          # 同一调用先败后成，只算成功
+        assert (len(s1.done), len(s1.failed)) == (1, 0)    # 同一调用先败后成，只算成功
 
 
 # ============================================================
@@ -206,7 +207,7 @@ class TestClose:
         s = ledger.settle({"t1": done("t1", "R1")}, [], 0)
         c = ledger.close({"t1": done("t1", "R1"), "t2": pending("t2")}, s.episodes, 0)
         assert len(c.history) == 2
-        assert "成功：R1" in c.history[0] and "未执行" in c.history[1]
+        assert "成功：R1" in c.history[0].full and "未执行" in c.history[1].full
 
     def test_nothing_executed(self):
         c = ledger.close({}, [], 0)

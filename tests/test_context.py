@@ -6,7 +6,7 @@
 
 import pytest
 
-from miagent.llm.context import Section, fit
+from miagent.llm.context import Section, choose, fit, join
 from miagent.protocol import AgentError, ErrorCode
 
 
@@ -107,3 +107,31 @@ class TestEstimatorIsInjected:
         body, notes = fit([Section("a", "A" * 30, priority=1, compact="a")],
                           limit=20, estimate=halved)
         assert notes == [] and body == "A" * 30
+
+
+class TestChoose:
+    """choose 给出每个片段的取舍，调用方据此知道哪些片段留下了。"""
+
+    def test_dropped_sections_map_to_none(self):
+        chosen, notes = choose([Section("keep", "K"), Section("t", "X" * 50, priority=1)],
+                               limit=5, estimate=size)
+        assert chosen == {"keep": "K", "t": None}
+        assert join(chosen) == "K" and notes == ["t→已丢弃"]
+
+    def test_compact_that_is_not_shorter_is_skipped(self):
+        """换上紧凑形式腾不出空间，就不换 —— 否则反而更长。"""
+        chosen, notes = choose([
+            Section("short", "ok", priority=1, compact="（结果从略）"),
+            Section("long", "X" * 50, priority=1, compact="x"),
+        ], limit=10, estimate=size)
+        assert chosen == {"short": "ok", "long": "x"}
+        assert notes == ["long→紧凑形式"]
+
+    def test_only_the_longest_is_reduced_when_that_suffices(self):
+        """逐条削减：一条超长只让它自己降级，同优先级的其余片段原样保留。"""
+        records = [Section("a", "A" * 5, priority=1, compact="a"),
+                   Section("b", "B" * 500, priority=1, compact="b"),
+                   Section("c", "C" * 5, priority=1, compact="c")]
+        chosen, notes = choose(records, limit=30, estimate=size)
+        assert chosen == {"a": "A" * 5, "b": "b", "c": "C" * 5}
+        assert notes == ["b→紧凑形式"]

@@ -597,6 +597,47 @@ class TestContextBudget:
         assert out["turn_summary"] == out["final_answer"]     # 摘要同源，不缺席
         assert "上下文放不下" in out["trace"][0]
 
+    def test_replanner_trims_only_the_oversized_result(self, registry):
+        """一条结果超长只让它自己换成简要形式：其余结论、失败记录与 id 都还在。"""
+        from miagent.graph.nodes import replanner
+        from miagent.memory import anchor as anchor_mod
+
+        huge = new_task("t1", "截屏识别", "echo")
+        huge["status"], huge["result"] = TaskStatus.DONE, "X" * 20000
+        short = new_task("t2", "查电量", "system.get_battery")
+        short["status"], short["result"] = TaskStatus.DONE, "电量 63%"
+        bad = new_task("t3", "订餐", "system.book_restaurant", {"name": "小馆 A"})
+        bad["status"], bad["error"], bad["result"] = TaskStatus.FAILED, "MC-4002", "已满座"
+        state = initial_state("订餐")
+        state["tasks"] = {"t1": huge, "t2": short, "t3": bad}
+        state["anchor"] = anchor_mod.build("订餐", state["tasks"])
+        llm = llm_for(plan(), replan=plan(task("t4", "system.book_restaurant", name="小馆 B")))
+
+        out = replanner(state, Deps(llm=llm, registry=registry))
+        body = llm.seen[-1][1].content
+        assert "X" * 100 not in body
+        assert "t1（已完成）: 截屏识别（结果从略）" in body      # id 仍可供 $from 引用
+        assert "电量 63%" in body and "已满座" in body
+        assert "已完成·t1→紧凑形式" in out["trace"][0]
+        assert "工具描述" not in out["trace"][0]              # 腾出的空间已经够了
+
+    def test_finalizer_keeps_the_other_conclusions(self, registry):
+        """收尾时一条结果超长，其余结论照样交给模型 —— 回答与本轮摘要才有具体内容。"""
+        huge = new_task("t1", "截屏识别", "echo")
+        huge["status"], huge["result"] = TaskStatus.DONE, "X" * 20000
+        short = new_task("t2", "查电量", "system.get_battery")
+        short["status"], short["result"] = TaskStatus.DONE, "电量 63%"
+        state = initial_state("查一下电量")
+        state["tasks"] = {"t1": huge, "t2": short}
+        llm = FakeLLM([final("电量 63%")])
+
+        out = finalizer(state, Deps(llm=llm, registry=registry))
+        body = llm.seen[-1][1].content
+        assert "X" * 100 not in body
+        assert "电量 63%" in body and "t1: 截屏识别 → 成功（结果从略）" in body
+        assert out["final_answer"] == "电量 63%"
+        assert "执行情况·t1→紧凑形式" in out["trace"][0]
+
     def test_no_trimming_note_when_everything_fits(self, registry):
         deps = Deps(llm=llm_for(plan(task("t1", "echo", text="hi"))), registry=registry)
         out = planner(initial_state("原样返回 hi"), deps)

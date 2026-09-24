@@ -72,29 +72,42 @@ class TestDedupe:
         assert [e["task_id"] for e in episodic.dedupe(eps)] == ["a", "b", "c"]
 
 
+def text(lines):
+    return "\n".join(line.full for line in lines)
+
+
 class TestRender:
     def test_current_generation_shows_results(self):
         eps = episodic.settle({"a": done("a", "结果A", x=1), "b": failed("b", x=2)}, [], 0)
-        done_text, failed_text = episodic.render(eps, generation=0)
-        assert "a（已完成）" in done_text and "结果A" in done_text
-        assert "b:" in failed_text and "MC-4002" in failed_text and "失败说明" in failed_text
+        done_lines, failed_lines = episodic.render(eps, generation=0)
+        assert "a（已完成）" in text(done_lines) and "结果A" in text(done_lines)
+        assert ("b:" in text(failed_lines) and "MC-4002" in text(failed_lines)
+                and "失败说明" in text(failed_lines))
+
+    def test_brief_form_drops_the_result_but_keeps_id_and_outcome(self):
+        """简要形式是逐条削减的落点：id 留着供引用，成败与错误码留着供判断。"""
+        eps = episodic.settle({"a": done("a", "结果A", x=1), "b": failed("b", x=2)}, [], 0)
+        (d,), (f,) = episodic.render(eps, generation=0)
+        assert d.task_id == "a" and "a（已完成）" in d.brief and "结果A" not in d.brief
+        assert f.task_id == "b" and "MC-4002" in f.brief and "失败说明" not in f.brief
 
     def test_older_generations_drop_results_but_keep_ids(self):
         """更早几轮的结果已经看过；此后只需知道 id 存在以便引用。"""
         eps = episodic.settle({"a": done("a", "结果A", x=1), "b": failed("b", x=2)}, [], 0)
-        done_text, failed_text = episodic.render(eps, generation=1)
-        assert "a（已完成）" in done_text and "结果A" not in done_text
-        assert "第 0 轮" in done_text
-        assert "MC-4002" in failed_text and "失败说明" not in failed_text
+        done_lines, failed_lines = episodic.render(eps, generation=1)
+        assert "a（已完成）" in text(done_lines) and "结果A" not in text(done_lines)
+        assert "第 0 轮" in text(done_lines)
+        assert "MC-4002" in text(failed_lines) and "失败说明" not in text(failed_lines)
+        assert all(line.full == line.brief for line in done_lines + failed_lines)
 
-    def test_empty_sections_are_explicit(self):
-        assert episodic.render([], 0) == ("  （无）", "  （无）")
+    def test_empty(self):
+        assert episodic.render([], 0) == ([], [])
 
     def test_same_call_failed_then_succeeded_shows_only_the_success(self):
         eps = episodic.settle({"t1": failed("t1", x=1)}, [], 0)
         eps += episodic.settle({"r1_t1": done("r1_t1", "R", x=1)}, eps, 1)
-        done_text, failed_text = episodic.render(eps, generation=1)
-        assert "r1_t1" in done_text and failed_text == "  （无）"
+        done_lines, failed_lines = episodic.render(eps, generation=1)
+        assert [line.task_id for line in done_lines] == ["r1_t1"] and failed_lines == []
 
 
 class TestHistoryAndSummary:
@@ -115,9 +128,19 @@ class TestHistoryAndSummary:
         tasks = {"t2": failed("t2", ErrorCode.AG_DEPENDENCY_UNRESOLVED.value),
                  "t3": pending("t3")}
         lines = episodic.history(eps, tasks)
-        assert lines[0].startswith("  t1:") and "成功：R1" in lines[0]
-        assert "AG-1005" in lines[1]
-        assert "未执行" in lines[2]
+        assert lines[0].full.startswith("  t1:") and "成功：R1" in lines[0].full
+        assert "AG-1005" in lines[1].full
+        assert "未执行" in lines[2].full
+
+    def test_history_brief_drops_results(self):
+        eps = episodic.settle({"t1": done("t1", "R1"), "t2": failed("t2")}, [], 0)
+        ok, bad = episodic.history(eps, {})
+        assert "成功" in ok.brief and "R1" not in ok.brief
+        assert "MC-4002" in bad.brief and "失败说明" not in bad.brief
+
+    def test_unexecuted_tasks_have_nothing_to_drop(self):
+        (line,) = episodic.history([], {"t3": pending("t3")})
+        assert line.full == line.brief
 
     def test_history_does_not_repeat_recorded_tasks(self):
         tasks = {"t1": done("t1")}
