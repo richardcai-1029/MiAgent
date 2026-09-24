@@ -9,6 +9,10 @@ from pydantic import ValidationError
 from miagent.protocol import (
     PROTOCOL_VERSION,
     AgentError,
+    AgentMethod,
+    RequestPriority,
+    TaskDispatchParams,
+    TaskDispatchResult,
     ErrorCode,
     JsonRpcRequest,
     JsonRpcResponse,
@@ -74,9 +78,50 @@ class TestMethodEnum:
         """厂商扩展必须带 miclaw/ 前缀，避免与未来的标准 MCP 方法撞名。"""
         standard = {Method.INITIALIZE, Method.INITIALIZED,
                     Method.TOOLS_LIST, Method.TOOLS_CALL, Method.PING}
-        for m in Method:
+        for m in [*Method, *AgentMethod]:
             if m not in standard:
                 assert m.startswith("miclaw/"), f"{m} 是扩展方法但没加前缀"
+
+    def test_the_two_directions_do_not_overlap(self):
+        """服务端受理的与 Agent 受理的方法不能同名，否则分发校验会放行反方向的调用。"""
+        assert not {*Method} & {*AgentMethod}
+
+
+class TestTaskDispatch:
+    """miclaw/task.dispatch：系统把用户请求派给 Agent。"""
+
+    def test_priority_defaults_to_foreground(self):
+        p = TaskDispatchParams.model_validate({"conversationId": "c", "request": "r"})
+        assert p.priority is RequestPriority.FOREGROUND
+
+    def test_priority_is_parsed_from_the_wire(self):
+        p = TaskDispatchParams.model_validate(
+            {"conversationId": "c", "request": "r", "priority": "background"})
+        assert p.priority is RequestPriority.BACKGROUND
+
+    def test_unknown_priority_is_rejected(self):
+        with pytest.raises(ValidationError):
+            TaskDispatchParams.model_validate(
+                {"conversationId": "c", "request": "r", "priority": "urgent"})
+
+    def test_numeric_priority_is_rejected(self):
+        """优先级是分级而非数值：没有来源的数值不能混进来。"""
+        with pytest.raises(ValidationError):
+            TaskDispatchParams.model_validate(
+                {"conversationId": "c", "request": "r", "priority": 5})
+
+    def test_unknown_field_is_rejected(self):
+        with pytest.raises(ValidationError):
+            TaskDispatchParams.model_validate(
+                {"conversationId": "c", "request": "r", "deadline": 100})
+
+    def test_conversation_is_required(self):
+        with pytest.raises(ValidationError):
+            TaskDispatchParams.model_validate({"request": "r"})
+
+    def test_result_carries_no_error_code(self):
+        """AG-* 码不上网络：响应只说完成与否，说明在 answer 里。"""
+        assert set(TaskDispatchResult.model_fields) == {"answer", "completed"}
 
 
 class TestJsonRpcEnvelope:

@@ -7,7 +7,9 @@ import pytest
 
 from miagent.graph import build_agent
 from miagent.llm import FakeLLM
-from miagent.runtime import Runtime, SlotPool, request_key
+from miagent.protocol import ResourceBudget, TaskDispatchParams
+from miagent.runtime import (INFERENCE_SLOTS, MAX_INFLIGHT, Runtime, SlotPool,
+                             build_runtime, dispatch_result, request_key)
 from miagent.tools import ToolRegistry, ToolSource
 from miagent.tools.base import Tool
 
@@ -238,6 +240,47 @@ class TestRuntime:
         with pytest.raises(ValueError):
             Runtime(StubAgent(), max_inflight=0)
 
+    def test_default_inflight(self):
+        rt = Runtime(StubAgent())
+        assert rt.max_inflight == MAX_INFLIGHT == 10
+        rt.close()
+
+
+class TestDispatch:
+    """miclaw/task.dispatch 的受理：对话即会话，协议优先级映射为运行时优先级。"""
+
+    def _params(self, conversation, request, priority=None):
+        raw = {"conversationId": conversation, "request": request}
+        if priority:
+            raw["priority"] = priority
+        return TaskDispatchParams.model_validate(raw)
+
+    def test_foreground_is_admitted_before_background(self):
+        agent = StubAgent()
+        gate = agent.gate("first")
+        with Runtime(agent, max_inflight=1) as rt:
+            rt.dispatch(self._params("c0", "first"))
+            wait_until(lambda: agent.started == ["first"])
+            bg = rt.dispatch(self._params("c1", "bg", "background"))
+            fg = rt.dispatch(self._params("c2", "fg"))          # 缺省即前台
+            gate.set()
+            bg.result(WAIT), fg.result(WAIT)
+        assert agent.started == ["first", "fg", "bg"]
+
+    def test_conversation_maps_to_session(self):
+        agent = StubAgent()
+        with Runtime(agent, max_inflight=4) as rt:
+            rt.dispatch(self._params("c1", "一"))
+            rt.dispatch(self._params("c1", "二")).result(WAIT)
+        assert agent.seen_history["二"] == ["一"]
+
+    def test_result_reports_completion_without_error_code(self):
+        done = {"final_answer": "好了", "failure": None}
+        failed = {"final_answer": "没能完成：权限不足", "failure": "MC-5001"}
+        assert dispatch_result(done).model_dump() == {"answer": "好了", "completed": True}
+        assert dispatch_result(failed).model_dump() == {
+            "answer": "没能完成：权限不足", "completed": False}
+
 
 # ============================================================
 # 接入图：配额由所有请求共用
@@ -317,3 +360,18 @@ class TestGraphUnderRuntime:
             for f in futures:
                 assert f.result(WAIT)["failure"] is None
         assert peak.peak == 1
+
+
+class TestBuildRuntime:
+    def test_wires_shared_slots_from_the_budget(self):
+        probe, llm = Probe(), TestGraphUnderRuntime()._llm()
+        budget = ResourceBudget(max_concurrent_calls=1)
+        rt = build_runtime(llm, ToolRegistry([probe]), budget,
+                           config={"recursion_limit": 80}, retry_delay_ms=0)
+        assert llm.slots.capacity == INFERENCE_SLOTS == 1
+        with rt:
+            futures = [rt.submit(f"请求{c}", session=c) for c in "AB"]
+            for f in futures:
+                assert f.result(WAIT)["failure"] is None
+        assert len(probe.keys) == 4
+        assert probe.peak.peak == 1        # 配额 1：两个请求合起来同一时刻也只有一个在飞

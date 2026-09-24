@@ -57,6 +57,16 @@ class Method(StrEnum):
     RESOURCE_QUERY = "miclaw/resource.query"       # 查询当前端侧资源配额与占用
 
 
+class AgentMethod(StrEnum):
+    """方向相反的一组方法：由 MiClaw 发起、Agent 受理。
+
+    与 Method 分列：Method 是服务端受理的方法集，服务端靠它做分发校验；
+    这里的方法服务端不受理，收到时按「不支持该 method」回 MC-2004。
+    """
+
+    TASK_DISPATCH = "miclaw/task.dispatch"         # 系统把一个用户请求派给 Agent
+
+
 # ============================================================
 # 一、JSON-RPC 2.0 三种报文
 # ============================================================
@@ -152,6 +162,42 @@ class ToolDescriptor(BaseModel):
     name: str
     description: str
     inputSchema: dict[str, Any]  # noqa: N815  字段名由 MCP 标准规定，保持驼峰
+
+
+class RequestPriority(StrEnum):
+    """请求优先级，按「有没有人正在等这个回答」分级。
+
+    分级依据是系统能确知的事实，而不是一个数值：用户是否在前台等待，
+    MiClaw 在派发时知道；「重要程度 7 分」这类数值没有来源，也无法跨 Agent 对齐。
+    """
+
+    FOREGROUND = "foreground"   # 用户正在等待回答，如语音或对话框里的提问
+    BACKGROUND = "background"   # 无人即时等待，如定时触发、系统事件触发
+
+
+class TaskDispatchParams(BaseModel):
+    """miclaw/task.dispatch 的请求参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 对话标识。同一对话的请求按派发先后逐个执行，后一个承接前一个的结论。
+    conversationId: str  # noqa: N815
+    request: str = Field(description="用户请求原文")
+    # 缺省按前台处理：系统没说明时，宁可让它占用资源，也不让一个可能正在等待的用户排在后面。
+    priority: RequestPriority = RequestPriority.FOREGROUND
+
+
+class TaskDispatchResult(BaseModel):
+    """miclaw/task.dispatch 的响应结果，在请求处理完后返回。
+
+    不带错误码：未完成时的 AG-* 码只在 Agent 侧（见错误码分层原则），
+    给用户的说明已经在 answer 里。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str
+    completed: bool
 
 
 class ToolCallResult(BaseModel):

@@ -11,7 +11,11 @@
     slots.request_key，请求在飞期间争用共享资源槽时按它排队。
 
 跨请求共享的资源（MiClaw 并发配额、模型推理）由 slots.SlotPool 仲裁，
-分别经 build_agent(miclaw_slots=...) 与 LLM.slots 接入，见各自说明。
+分别经 build_agent(miclaw_slots=...) 与 LLM.slots 接入；build_runtime 把
+这几处一并装好。
+
+MiClaw 经 miclaw/task.dispatch 派来的请求由 dispatch 受理：对话标识即会话，
+协议里的请求优先级映射为这里的优先级。
 
 请求在线程池里执行：沿用同步实现，不引入事件循环。
 
@@ -25,11 +29,28 @@ import threading
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..graph.state import AgentState
 from ..memory.session import Agent, Session
-from .slots import request_key
+from ..protocol import (RequestPriority, ResourceBudget, TaskDispatchParams,
+                        TaskDispatchResult)
+from .slots import SlotPool, request_key
+
+if TYPE_CHECKING:
+    from ..llm import LLM
+    from ..tools import ToolRegistry
+
+# 同时在飞的请求上限。暂定值，由项目给定，尚无设备内存实测作依据。
+MAX_INFLIGHT = 10
+
+# 推理槽容量。端侧推理是单个模型实例；槽数超过推理栈实际能并行服务的数目时，
+# 多出的调用会在推理栈内部按到达先后排队，优先级在那里不再起作用。
+# 1 对任何推理栈都成立。推理栈确实能并行服务多路时，按其实际能力调大。
+INFERENCE_SLOTS = 1
+
+# 协议优先级到运行时优先级的映射：前台先于后台。
+PRIORITY_RANK = {RequestPriority.FOREGROUND: 1, RequestPriority.BACKGROUND: 0}
 
 
 @dataclass
@@ -43,11 +64,11 @@ class _Job:
 class Runtime:
     """接收多份请求并发执行。
 
-    max_inflight 是同时在飞的请求上限，由调用方按设备内存等约束给定 ——
-    每个在飞请求各持一份任务图与记忆，常驻内存随它线性增长。
+    max_inflight 是同时在飞的请求上限 —— 每个在飞请求各持一份任务图与记忆，
+    常驻内存随它线性增长。
     """
 
-    def __init__(self, agent: Agent, max_inflight: int,
+    def __init__(self, agent: Agent, max_inflight: int = MAX_INFLIGHT,
                  config: dict[str, Any] | None = None) -> None:
         if max_inflight < 1:
             raise ValueError(f"max_inflight 至少为 1，收到 {max_inflight}")
@@ -79,6 +100,11 @@ class Runtime:
             self._queues.setdefault(session, deque()).append(job)
             self._admit()
             return job.future
+
+    def dispatch(self, params: TaskDispatchParams) -> Future[AgentState]:
+        """受理一个 miclaw/task.dispatch 请求。结果用 dispatch_result 转成响应。"""
+        return self.submit(params.request, session=params.conversationId,
+                           priority=PRIORITY_RANK[params.priority])
 
     def session(self, name: str = "default") -> Session:
         """取某个会话，可查看它的轮次记录。"""
@@ -139,3 +165,30 @@ class Runtime:
                 self._inflight -= 1
                 self._admit()
                 self._cond.notify_all()
+
+
+def dispatch_result(state: AgentState) -> TaskDispatchResult:
+    """把收尾后的状态转成 miclaw/task.dispatch 的响应结果。"""
+    return TaskDispatchResult(answer=state["final_answer"],
+                              completed=state.get("failure") is None)
+
+
+def build_runtime(llm: LLM, registry: ToolRegistry, budget: ResourceBudget, *,
+                  max_inflight: int = MAX_INFLIGHT,
+                  inference_slots: int = INFERENCE_SLOTS,
+                  config: dict[str, Any] | None = None,
+                  **build_kwargs: Any) -> Runtime:
+    """构图并装好跨请求共享的资源槽，返回运行时。
+
+    MiClaw 调用槽的容量取握手下发的 max_concurrent_calls，由全部请求共用；
+    推理槽装在 llm 上，同一个 llm 对象的所有调用都经它排队。
+    手工装配时漏掉任何一处都不会报错，只会让并发超出配额，故收在这一处。
+    """
+    from ..graph import build_agent        # 惰性导入：本模块不依赖图引擎
+
+    llm.slots = SlotPool(inference_slots)
+    agent = build_agent(llm, registry,
+                        max_concurrent_miclaw=budget.max_concurrent_calls,
+                        miclaw_slots=SlotPool(budget.max_concurrent_calls),
+                        **build_kwargs)
+    return Runtime(agent, max_inflight=max_inflight, config=config)

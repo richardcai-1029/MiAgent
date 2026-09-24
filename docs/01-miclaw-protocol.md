@@ -5,7 +5,7 @@
 | 协议基线 | MCP over JSON-RPC 2.0 |
 | 角色 | Agent 为客户端，MiClaw 为服务端 |
 | 协议版本 | `2026-01-01` |
-| 文档版本 | v1.1 |
+| 文档版本 | v1.2 |
 | 对应实现 | `miagent/protocol/`、`miagent/transport.py`、`miagent/mock_server/` |
 
 > **规约来源说明**
@@ -73,7 +73,7 @@ JSON-RPC 2.0 定义三种报文，本规约不作扩展。
 
 ## 四、方法集
 
-共 8 个方法，其中 5 个为标准 MCP，3 个为 MiClaw 扩展。
+共 9 个方法，其中 5 个为标准 MCP，4 个为 MiClaw 扩展。除 `miclaw/task.dispatch` 由 MiClaw 发给 Agent 外，其余均由 Agent 发给 MiClaw。
 
 | method | 类型 | 允许调用的会话状态 |
 |---|---|---|
@@ -85,6 +85,7 @@ JSON-RPC 2.0 定义三种报文，本规约不作扩展。
 | `miclaw/agent.register` | MiClaw 扩展 | `handshaked` |
 | `miclaw/agent.unregister` | MiClaw 扩展 | `registered` |
 | `miclaw/resource.query` | MiClaw 扩展 | `handshaked`、`registered` |
+| `miclaw/task.dispatch` | MiClaw 扩展，MiClaw → Agent | `registered` |
 
 ### `initialize`
 
@@ -146,6 +147,39 @@ Agent 向系统登记身份、能力、权限需求与资源画像。标准 MCP 
 ### `miclaw/resource.query`
 
 查询当前资源配额与占用。允许在握手后、注册前调用，使 Agent 可以先了解自身能获得多少资源，再决定申请哪些权限、声明哪些能力，避免「先承诺、后发现资源不足」而多付一轮往返。
+
+### `miclaw/task.dispatch`
+
+系统把一个用户请求派给 Agent。方向与其余方法相反：MiClaw 发起，Agent 受理并在处理完后回复。JSON-RPC 2.0 不限定哪一方发起请求，标准 MCP 同样有服务端发起的请求。注册时声明的 `capabilities.intents` 就是系统据以选中这个 Agent 的依据。
+
+请求 `params`：
+
+```json
+{"conversationId": "conv-42", "request": "今晚有空吗", "priority": "foreground"}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `conversationId` | 是 | 对话标识。同一对话的请求按派发先后逐个执行，后一个承接前一个的结论；不同对话可以并发 |
+| `request` | 是 | 用户请求原文 |
+| `priority` | 否 | 请求优先级，取值见下；缺省为 `foreground` |
+
+响应 `result`：`answer`（给用户的回答）、`completed`（布尔，本轮是否完成）。未完成时不带错误码——`AG-*` 码只在 Agent 侧（见第五节），给用户的说明已经在 `answer` 里。
+
+**请求优先级**按「有没有人正在等这个回答」分级：
+
+| 取值 | 含义 |
+|---|---|
+| `foreground` | 用户正在等待回答，如语音或对话框里的提问 |
+| `background` | 无人即时等待，如定时触发、系统事件触发 |
+
+分级依据是系统能确知的事实，而不是一个数值：用户是否在前台等待，MiClaw 派发时知道；「重要程度 7 分」这类数值没有来源，也无法在多个 Agent 之间对齐。缺省按前台处理——系统没说明时，宁可让它占用资源，也不让一个可能正在等待的用户排在后面。
+
+Agent 侧按优先级决定请求的准入顺序，以及在飞请求争用 MiClaw 调用配额与模型推理时的先后；同一优先级按到达先后。实现见 `miagent.runtime`。
+
+服务端不受理此方法，Agent 反向发送时返回 `MC-2004`。
+
+**实现状态**：报文模型（`TaskDispatchParams` / `TaskDispatchResult`）与 Agent 侧受理（`Runtime.dispatch`）已实现。客户端接收服务端发起的请求需要传输层分流——同一条管道上既有自己请求的响应、又有对端发来的请求——尚未实现，与第七节并发调用所需的多路复用是同一项工作。
 
 ### `ping`
 
@@ -279,7 +313,7 @@ Agent 向系统登记身份、能力、权限需求与资源画像。标准 MCP 
 | 字段 | 执行位置 |
 |---|---|
 | `max_memory_mb` | 服务端在工具执行前比对工具申报的预估开销，超限返回 `MC-4001` |
-| `max_concurrent_calls` | Agent 侧调度器限制同一轮并行派发的 MiClaw 调用数，超出者顺延 |
+| `max_concurrent_calls` | Agent 侧：调度器限制单个请求一轮派发的 MiClaw 调用数，超出者顺延；多个请求同时在飞时共用一个同容量的调用槽，合计不超出 |
 | `max_call_timeout_ms` | Agent 侧客户端用作单次工具调用的等待上限，超时返回 `MC-1003` |
 | `power_saving` | 服务端据此拒绝高开销调用，返回 `MC-4003` |
 
@@ -290,5 +324,7 @@ Agent 向系统登记身份、能力、权限需求与资源画像。标准 MCP 
 ## 八、版本与扩展
 
 协议版本采用日期格式（当前 `2026-01-01`），握手时双方比对，不匹配即中止。
+
+新增方法不改变既有方法的含义，不升版本号：不认识新方法的一方收到它时回 `MC-2004`，调用方据此知道对端不支持。
 
 扩展方法一律使用 `miclaw/` 前缀。任何标准 MCP 客户端看到不认识的 `miclaw/xxx` 会明确知道这是厂商扩展，而非协议损坏；未来标准 MCP 若出现同名方法，两者可以共存而无需重命名。错误码与方法名一旦上线即为永久 API，此项隔离是必要的前置设计。

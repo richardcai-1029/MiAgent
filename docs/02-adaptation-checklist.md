@@ -4,7 +4,7 @@
 |---|---|
 | 基础框架 | LangGraph `>=1.2,<2.0`（实测通过 1.2.10、1.2.11） |
 | 目标生态 | MiClaw 系统级 Agent 生态 · MiMo 端侧大模型 |
-| 文档版本 | v3.2 |
+| 文档版本 | v3.3 |
 
 本清单记录已完成并经测试验证的改造项。每项均给出落地位置、验证方式与**框架侵入面**，可逐条核查。
 
@@ -32,6 +32,7 @@ LangGraph 的工具调用是进程内 Python 函数调用，不存在跨进程�
 | A-4 | 会话无时序约束，任何时刻均可调用工具 | 握手状态机，以声明式状态表强制 `initialize → register → 调用` | `_REQUIRED_STATE`；违规返回 MC-2002 | L0 |
 | A-5 | 厂商扩展方法与标准方法无命名隔离 | 扩展方法统一 `miclaw/` 前缀，避免与未来标准 MCP 方法撞名 | `test_protocol.py::test_extensions_are_namespaced` | L0 |
 | A-6 | 无协议版本协商 | `initialize` 比对版本，不匹配返回 MC-2001 | `test_mock_server.py::test_version_mismatch` | L0 |
+| A-7 | 协议只有 Agent 调用系统的方向，系统把用户请求派给 Agent 的报文不存在；请求无优先级，多个请求同时到达时 Agent 无从区分谁更急 | 扩展 `miclaw/task.dispatch`（MiClaw → Agent）：对话标识、请求原文、请求优先级。优先级按「有没有人正在等这个回答」分为 `foreground` / `background` 两级而非数值，缺省按前台；响应只给回答与是否完成，AG-* 码不上网络。服务端受理的方法与 Agent 受理的方法分列两个枚举，反向发送返回 MC-2004。客户端接收服务端发起的请求需传输层分流，尚未实现 | `protocol/messages.py::AgentMethod` / `TaskDispatchParams` / `TaskDispatchResult`、`Runtime.dispatch`；`test_protocol.py::TestTaskDispatch`、`test_runtime.py::TestDispatch` | L0 |
 
 ### B · 错误处理体系
 
@@ -56,7 +57,7 @@ LangGraph 面向云端设计，不存在内存配额、并发上限等概念。�
 | C-2 | 无资源配额下发机制 | 握手时下发 `ResourceBudget`，Agent 全程受其约束 | `protocol/messages.py::ResourceBudget` | L0 |
 | C-3 | 工具无资源画像，无法预判开销 | 工具申报 `estimated_memory_mb`，服务端执行前校验 | 超配额返回 MC-4001，见 `test_memory_limit` | L0 |
 | C-7 | `max_call_timeout_ms` 无执行机制：所有请求一律用连接级超时，一个工具卡住要拖到整条链路超时才被发现 | 工具调用改用配额下发的单次调用超时，其余请求仍用连接级超时；握手未完成时退回连接级 | `client.call_timeout`；`test_client.py::TestPerCallTimeout` | L0 |
-| C-6 | `max_concurrent_calls` 无执行机制 | 当前同步实现天然串行；如引入并发需加信号量，否则应移除该字段 | `scheduler` 按 `max_concurrent_calls` 限流 MiClaw 派发，超出者顺延；本地工具受 GIL 限制不设限 | L1 |
+| C-6 | `max_concurrent_calls` 无执行机制 | 当前同步实现天然串行；如引入并发需加信号量，否则应移除该字段 | `scheduler` 按 `max_concurrent_calls` 限流单个请求一轮的 MiClaw 派发，超出者顺延；多个请求同时在飞时共用一个同容量、按优先级排队的调用槽（`runtime.SlotPool`），合计不超出配额；本地工具受 GIL 限制不设限 | L1 |
 
 ### D · MiMo 模型接入
 
@@ -106,6 +107,8 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 | G-9 | Evaluator 每轮无条件写回 `failure: None`。重规划失败（如产出的图依赖缺失）后剩余任务照常执行，任一成功即把那个失败抹掉，收尾时报告成功 | 只在判定中止时写 `failure`；重规划的失败一直保留到收尾 | `nodes.evaluator`；`test_graph.py::test_failed_replan_is_not_masked_by_later_successes` | L0 |
 | G-10 | 「没有任务可调度了」被当成「目标达成了」的最后一道判据。计划本身漏掉一步时，每个任务都成功、没有失败记录、重规划也没被触发，任务图这一层完全看不出异常，用户拿到的是一个自信的、漏做的回答 | 判完成与收尾之间插入完成校验：以目标锚（用户目标 + 首次拆解）对照本轮执行记录，判未达成则带着缺口转重规划补做，重规划已达上限则带 AG-1006 收尾。补做同样受无进展判定约束——新任务全是这一轮调过的调用（成败都算）即判 AG-1003 不派发，带副作用的系统调用不会为了补做而发生第二次。一次工具都没调、或已经带着错误码时不做这次推理 | `nodes.verify_goal`、`routers.route_after_goal_verifier`、`build.py` 接入节点与条件边、`ledger.survey` / `accept(standing=)`、`episodic.repeats_calls`；`test_verify.py::TestGoalVerifier`、`TestGoalVerificationEndToEnd` | L1 |
 | G-7 | 任务参数由模型一次性写死，下游任务取不到上游结果，多个工具只是多次互不相干的调用 | 参数中以 `{"$from": "任务 id"}` 引用上游结果，派发前确定性求值；引用即依赖，先后关系由引用派生，不依赖模型再声明一遍 | `graph/dataflow.py`；`test_dataflow.py` 23 条用例 | L0 |
+| G-11 | 一次 invoke 只处理一个请求，多个用户同时发起请求时只能排队串行；若直接多线程并发 invoke，各请求按配额各自派发，MiClaw 调用合计超出 `max_concurrent_calls`，同一对话的两轮同时执行则后一轮看不到前一轮 | 图之上加多请求运行时：每个请求仍是独立的 invoke；同一会话内串行、不同会话并发；在飞请求数受 `max_inflight` 准入（默认 10，暂定）；按 (优先级, 提交先后) 出队。MiClaw 调用配额与模型推理（默认 1 个推理槽）经按优先级排队的资源槽由全部请求共用，请求的优先级键经 contextvars 传入并行分支。槽只在单次调用期间持有，不会循环等待。防饥饿先不做 | `miagent/runtime/`（`Runtime`、`SlotPool`、`build_runtime`）、`nodes.execute`、`LLM._guarded`；`test_runtime.py`、`test_framework_contract.py` 契约六、七 | **L2** |
+| G-12 | 就绪任务按 id 字母序派发：配额放不下全部就绪任务时，关键路径上的任务可能被顺延，整张图多跑一轮；且按字符串排序时 `task_10` 排在 `task_2` 之前，目标锚的步骤排列也因此错位 | 就绪任务按 (-下游最长链长度, 规划序号, id) 排序，下游最长链只沿未终结任务计；任务新增规划序号 `seq`，按模型输出顺序编号、重规划时接续，派发的决胜项与目标锚都改看它 | `dag.downstream_depth` / `ready`、`nodes._build_tasks`、`memory/anchor.py`；`test_dag.py::TestReadyOrder`、`test_graph.py::TestDispatchOrder` | L0 |
 
 
 ### H · 框架版本风险控制
@@ -116,7 +119,7 @@ LangGraph 的部分行为约定写在文档而非类型签名里，升级失配�
 | 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
 |---|---|---|---|---|
 | H-1 | 框架接触面无约束，任何模块都可 import langgraph，升级的影响范围不可枚举 | AST 扫描守卫，只允许构图与路由两个模块 import langgraph；新增即失败并要求更新风险分级 | `test_layering.py::test_framework_surface_is_confined` | L0 |
-| H-2 | 所依赖的框架语义约定无测试覆盖，升级失配时静默失效 | 框架契约测试：以最小图逐条固化 Send payload 范围、reducer 合并时机、条件边返回类型、中断恢复，不引用业务模块 | `tests/test_framework_contract.py`，5 条用例 | L1（仅测试代码） |
+| H-2 | 所依赖的框架语义约定无测试覆盖，升级失配时静默失效 | 框架契约测试：以最小图逐条固化 Send payload 范围、reducer 合并时机、条件边返回类型、中断恢复、并行分支继承调用方 contextvars、同一编译图并发 invoke 的状态隔离，不引用业务模块 | `tests/test_framework_contract.py`，7 条用例 | L1（仅测试代码） |
 | H-3 | 版本声明无上限，升级可在无人察觉时发生 | 收紧为 `langgraph>=1.2,<2.0`，实测通过版本记录在文档抬头 | `pyproject.toml` | L0 |
 
 ---
@@ -142,14 +145,15 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 39 | A 组全部、B 组全部、C-2、C-3、C-7、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、H-1、H-3 |
+| L0 | 41 | A 组全部、B 组全部、C-2、C-3、C-7、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、H-1、H-3 |
 | L1 | 5 | C-6、D-10、G-2、G-10、H-2 |
-| L2 | 1 | **G-5** |
+| L2 | 2 | **G-5**、**G-11** |
 | L3 | 0 | — |
 
-合计 45 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
+合计 48 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
 B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增，
-D-6、D-7、D-8、D-9、D-10、G-9、G-10 为第 3 周新增。
+D-6、D-7、D-8、D-9、D-10、G-9、G-10 为第 3 周新增，
+A-7、G-11、G-12 为多请求并发与调度优先级改造新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，
@@ -183,6 +187,25 @@ G-5 以 `Send` 扇出同层任务，依赖两条**语义约定**：
 **回退路径**：G-5 的框架相关部分只在 `routers.py` 的一个函数里。
 调度决策（哪些任务就绪、并发配额如何分配）都在 `scheduler` 节点与 `dag.py` 的纯函数中，
 与框架无关。因此降级为串行执行只需改路由返回值，任务图与调度语义不受影响。
+
+### 高风险项 G-11：多请求运行时
+
+G-11 的运行时本身不 import langgraph，但依赖两条**语义约定**：
+
+1. **并行分支继承调用方的 contextvars。** 运行时把请求的优先级键设进 contextvars，
+   执行节点在共享资源槽前排队时读它，节点代码因此不需要知道自己属于哪个请求。
+2. **同一个编译好的图可被多个线程同时 invoke，状态互不串。** 每个请求一次 invoke，共用一个图。
+
+| 约定失效 | 静默表现 |
+|---|---|
+| 分支不再继承 contextvars | 分支读到默认键，所有请求同键，优先级不再生效，退化为按排队先后；配额仍守得住 |
+| 并发 invoke 共享状态 | 一个请求的结果混进另一个请求 |
+
+**检测手段**：`test_framework_contract.py` 契约六、七。
+
+**回退路径**：优先级键改为显式传递——调度器写进 `DispatchItem`、随 `Send` 的 payload 带到执行节点，
+模型调用则由节点从状态里取。改动落在 `scheduler`、`routers.py` 与调模型的节点，资源槽与运行时不变。
+第二条若失效，退回每个请求各编译一张图。
 
 ### 版本敏感项 E-8：分层守卫的依赖假设
 

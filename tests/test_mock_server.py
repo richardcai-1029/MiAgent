@@ -73,6 +73,14 @@ class TestProtocolLevel:
         s = MiClawMockServer()
         assert code_of(s.handle(req(1, "tools/delete"))) == "MC-2004"
 
+    def test_agent_side_method_is_not_accepted_by_server(self):
+        """task.dispatch 由 MiClaw 发给 Agent；反方向发给服务端按不支持处理。"""
+        from miagent.protocol import AgentMethod
+        s = make_registered()
+        resp = s.handle(req(9, AgentMethod.TASK_DISPATCH,
+                            conversationId="c", request="今晚有空吗"))
+        assert code_of(resp) == "MC-2004"
+
     def test_notification_gets_no_response(self):
         s = MiClawMockServer()
         s.handle(req(1, Method.INITIALIZE, protocolVersion=PROTOCOL_VERSION))

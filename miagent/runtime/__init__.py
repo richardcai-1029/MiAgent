@@ -4,7 +4,9 @@
 —— 多个请求同时在飞。纯 Python，不依赖图引擎。
 """
 
-from .runtime import Runtime
+from .runtime import (INFERENCE_SLOTS, MAX_INFLIGHT, PRIORITY_RANK, Runtime,
+                      build_runtime, dispatch_result)
 from .slots import SlotPool, request_key
 
-__all__ = ["Runtime", "SlotPool", "request_key"]
+__all__ = ["INFERENCE_SLOTS", "MAX_INFLIGHT", "PRIORITY_RANK", "Runtime", "SlotPool",
+           "build_runtime", "dispatch_result", "request_key"]

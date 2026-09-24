@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import contextvars
 import operator
+import threading
 from typing import Annotated, Any, TypedDict
 
 import pytest
@@ -224,3 +226,68 @@ def test_interrupt_before_pauses_and_resumes():
 
     resumed = app.invoke(None, config)
     assert resumed["marker"] == "before;risky;", "以 None 恢复执行失败"
+
+
+# ============================================================
+# 契约六：并行分支继承调用方的 contextvars
+# ============================================================
+
+_caller_key: contextvars.ContextVar[str] = contextvars.ContextVar("caller_key", default="")
+
+
+def test_send_branches_inherit_caller_contextvars():
+    """依赖方：多请求运行时（清单 G-11）。
+
+    运行时把请求的优先级键设进 contextvars，执行节点在共享资源槽前排队时
+    读它；节点代码因此不需要知道自己属于哪个请求。
+    契约失效后的静默表现：分支读到默认值，所有请求同键，优先级不再生效，
+    仍按排队先后执行，不报错。
+    """
+    seen: list[str] = []
+
+    def worker(payload: dict[str, Any]) -> dict[str, Any]:
+        seen.append(_caller_key.get())
+        return {"outcomes": [payload["task"]["id"]]}
+
+    app = _fanout_graph(worker)
+    token = _caller_key.set("request-7")
+    try:
+        app.invoke(_initial())
+    finally:
+        _caller_key.reset(token)
+    assert seen == ["request-7", "request-7"], "并行分支没有继承调用方的 contextvars"
+
+
+# ============================================================
+# 契约七：同一个编译好的图可被多个线程同时 invoke，状态互不串
+# ============================================================
+
+
+def test_concurrent_invokes_do_not_share_state():
+    """依赖方：多请求运行时（清单 G-11）。每个请求一次 invoke，共用一个编译好的图。
+
+    契约失效后的静默表现：一个请求的结果混进另一个请求的状态。
+    """
+    gate = threading.Barrier(2)
+
+    def worker(payload: dict[str, Any]) -> dict[str, Any]:
+        return {"outcomes": [payload["task"]["id"]]}
+
+    def sink(state: _State) -> dict[str, Any]:
+        gate.wait(timeout=5)            # 两次 invoke 同时停在这里，确认确实重叠
+        return {}
+
+    app = _fanout_graph(worker, sink)
+    results: dict[str, Any] = {}
+
+    def run(name: str) -> None:
+        results[name] = app.invoke(_initial())
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in ("x", "y")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    # 状态若共享，两次 invoke 的四条结果会汇进同一个列表
+    assert results["x"]["outcomes"] == ["a", "b"]
+    assert results["y"]["outcomes"] == ["a", "b"]
