@@ -5,8 +5,8 @@
 """
 
 from .runtime import (INFERENCE_SLOTS, MAX_IDLE_SESSIONS, MAX_INFLIGHT, PRIORITY_RANK,
-                      Runtime, build_runtime, dispatch_result)
+                      Runtime, build_runtime, dispatch_result, serve)
 from .slots import SlotPool, request_key
 
 __all__ = ["INFERENCE_SLOTS", "MAX_IDLE_SESSIONS", "MAX_INFLIGHT", "PRIORITY_RANK", "Runtime", "SlotPool",
-           "build_runtime", "dispatch_result", "request_key"]
+           "build_runtime", "dispatch_result", "request_key", "serve"]

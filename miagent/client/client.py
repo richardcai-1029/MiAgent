@@ -3,17 +3,29 @@
 职责边界要清楚 —— 这一层只管「把协议说对」：
   · 构造合法请求、配对响应、把服务端错误还原成异常
   · 做本地时序预检，非法调用不发出去
+  · 受理 MiClaw 主动发来的请求与通知，转交登记好的处理函数
 它不管「该调哪个工具」（那是 graph 层的事），也不碰大模型。
 
-同步阻塞实现，不引入 asyncio。端侧的取舍：
-Agent 的调用天然是串行的（模型想一步、调一次），没有事件循环
-就省掉一整套调度机制和常驻内存，这也是「轻量化」的一部分。
+收发分流：同一条管道上既有自己请求的响应，也有 MiClaw 主动发来的请求与通知。
+一个读线程独占接收，按报文种类分流 ——
+
+    带 method              → MiClaw 发来的请求（有 id）或通知（无 id），交给处理函数
+    不带 method、带 id      → 自己某个请求的响应，按 id 交给等它的那个调用
+
+发出请求的线程只负责写一行、再等自己的那个 id，不碰接收。多个线程因此可以
+同时各有一个请求在途，响应先到先交付，不必按发出的顺序。
+
+用线程而不引入 asyncio：没有事件循环就省掉一整套调度机制和常驻内存，
+这也是「轻量化」的一部分。
 """
 
 from __future__ import annotations
 
 import sys
 import threading
+from collections.abc import Callable
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any
 
 from ..protocol import (
@@ -25,9 +37,14 @@ from ..protocol import (
     JsonRpcRequest,
     JsonRpcResponse,
     Method,
+    MiAgentError,
     MiClawError,
+    RequestId,
     ResourceBudget,
     ToolDescriptor,
+    error_response,
+    parse_incoming,
+    success_response,
 )
 from ..transport import SubprocessTransport, log
 
@@ -36,6 +53,11 @@ DEFAULT_SERVER_COMMAND = [sys.executable, "-m", "miagent.mock_server"]
 
 # 用哨兵而非 None 作 timeout 的缺省值：None 是合法取值，表示"一直等"。
 _UNSET: Any = object()
+
+# MiClaw 发来的请求的处理函数：收 params，返回 result，或返回一个将来给出
+# result 的 Future（耗时的处理必须这样做，不能占住读线程）。
+RequestHandler = Callable[[dict[str, Any]], "dict[str, Any] | Future[dict[str, Any]]"]
+NotificationHandler = Callable[[dict[str, Any]], None]
 
 
 class MiClawClient:
@@ -50,14 +72,19 @@ class MiClawClient:
         self._transport = transport or SubprocessTransport(command or DEFAULT_SERVER_COMMAND)
         self._timeout = timeout
         self._next_id = 0
-        # 图层的并行派发会让多个线程同时进来。客户端本身是同步阻塞的：
-        # id 分配不是原子操作（两个线程可能拿到同一个 id，导致响应配对错乱），
-        # 管道写入也可能字节交错破坏按行分帧。加锁保证正确性。
-        #
-        # 代价：MiClaw 调用因此被串行化，图层的并行拿不到实际提速。
-        # 要拿到真实并发，需要传输层支持多路复用（连发多个请求不等回复，
-        # 按 id 配对响应）且服务端并发处理，两项均尚未实现。
-        self._lock = threading.RLock()
+        # 两把锁各管一件事，都只在一瞬间持有，等响应时不持锁：
+        # id 分配不是原子操作（两个线程拿到同一个 id 会让响应配对错乱）；
+        # 两个线程同时写管道可能字节交错，破坏按行分帧。
+        self._id_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+
+        # 在途请求：id → 等它响应的 Future。读线程按 id 交付。
+        self._pending: dict[RequestId, Future[JsonRpcResponse]] = {}
+        self._pending_lock = threading.Lock()
+        self._closed_error: MiClawError | None = None
+
+        self._request_handlers: dict[str, RequestHandler] = {}
+        self._notification_handlers: dict[str, NotificationHandler] = {}
 
         # 本地会话状态。服务端才是权威，这里只是为了「非法调用不出门」，
         # 省一次进程间往返 —— 前端表单校验和后端校验的关系。
@@ -70,52 +97,179 @@ class MiClawClient:
         self.denied_permissions: list[dict[str, Any]] = []
         self.session_id: str | None = None
 
+        self._reader = threading.Thread(target=self._read_loop, name="miclaw-reader",
+                                        daemon=True)
+        self._reader.start()
+
     # ------------------------------------------------------------
     # 底层收发
     # ------------------------------------------------------------
 
+    def _send(self, msg: dict[str, Any]) -> None:
+        with self._send_lock:
+            self._transport.send(msg)
+
     def _request(self, method: Method, params: dict[str, Any] | None = None,
                  timeout: float | None = _UNSET) -> dict[str, Any]:
-        """发一个请求并等它的响应。整段临界区加锁，见 __init__ 的说明。
+        """发一个请求并等它的响应。
 
         timeout 缺省时用连接级超时；工具调用会传入握手时下发的单次调用配额。
         """
-        with self._lock:
-            return self._request_locked(
-                method, params, self._timeout if timeout is _UNSET else timeout)
+        with self._id_lock:
+            self._next_id += 1
+            request_id = self._next_id
 
-    def _request_locked(self, method: Method, params: dict[str, Any] | None,
-                        timeout: float | None) -> dict[str, Any]:
-        self._next_id += 1
-        request_id = self._next_id
+        # 先登记再发送：响应可能在 send 返回之前就被读线程收到。
+        waiter: Future[JsonRpcResponse] = Future()
+        with self._pending_lock:
+            if self._closed_error is not None:
+                raise self._closed_error
+            self._pending[request_id] = waiter
+        try:
+            self._send(JsonRpcRequest(id=request_id, method=method, params=params)
+                       .model_dump(exclude_none=True))
+            response = self._wait(waiter, self._timeout if timeout is _UNSET else timeout)
+        finally:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
 
-        self._transport.send(
-            JsonRpcRequest(id=request_id, method=method, params=params).model_dump(exclude_none=True)
-        )
+        if response.error is not None:
+            raise self._to_exception(response.error)
+        return response.result or {}
 
-        while True:
-            raw = self._transport.receive(timeout=timeout)
-            if raw is None:
-                raise MiClawError(ErrorCode.MC_TRANSPORT_CLOSED, "服务端在响应前关闭了连接")
-
-            response = JsonRpcResponse.model_validate(raw)
-
-            # ★ id 配对。同步收发也不能省这一步：上次超时的请求，
-            #   它的响应可能现在才到，不核对就会张冠李戴。
-            if response.id != request_id:
-                log(f"[client] 丢弃过期响应 id={response.id}（正在等 id={request_id}）")
-                continue
-
-            if response.error is not None:
-                raise self._to_exception(response.error)
-            return response.result or {}
+    def _wait(self, waiter: Future[JsonRpcResponse], timeout: float | None) -> JsonRpcResponse:
+        """等一个在途请求的响应。超时抛 MC-1003；超时之后才到的响应由读线程丢弃。"""
+        try:
+            return waiter.result(timeout=timeout)
+        except FutureTimeout:
+            raise MiClawError(ErrorCode.MC_REQUEST_TIMEOUT, f"等待响应超过 {timeout}s",
+                              detail={"timeout_s": timeout}) from None
 
     def _notify(self, method: Method, params: dict[str, Any] | None = None) -> None:
         """发一条通知。没有 id，不等回复。"""
-        with self._lock:
-            self._transport.send(
-                JsonRpcNotification(method=method, params=params).model_dump(exclude_none=True)
-            )
+        self._send(JsonRpcNotification(method=method, params=params)
+                   .model_dump(exclude_none=True))
+
+    # ------------------------------------------------------------
+    # 接收与分流：只在读线程里运行
+    # ------------------------------------------------------------
+
+    def _read_loop(self) -> None:
+        reason = "服务端在响应前关闭了连接"
+        while True:
+            try:
+                raw = self._transport.receive()
+            except MiClawError as e:
+                # 一行不是合法 JSON：拿不到 id，无从回复也无从交付，丢弃这一行继续读
+                log(f"[client] 丢弃无法解析的报文: {e}")
+                continue
+            except Exception as e:        # 传输本身坏了，按连接关闭处理
+                reason = f"读取报文失败: {e!r}"
+                break
+            if raw is None:
+                break
+            try:
+                self._route(raw)
+            except Exception as e:        # 分流出错不能让读线程死掉
+                log(f"[client] 处理报文时出错（已丢弃）: {e!r}")
+
+        closed = MiClawError(ErrorCode.MC_TRANSPORT_CLOSED, reason)
+        with self._pending_lock:
+            self._closed_error = closed
+            waiters, self._pending = list(self._pending.values()), {}
+        for w in waiters:
+            if not w.done():
+                w.set_exception(closed)
+
+    def _route(self, raw: dict[str, Any]) -> None:
+        if "method" in raw:
+            self._on_incoming(raw)
+            return
+        response = JsonRpcResponse.model_validate(raw)
+        with self._pending_lock:
+            waiter = self._pending.get(response.id)
+        if waiter is None or waiter.done():
+            # 超时后才到的响应：等它的调用已经放弃，交给谁都是张冠李戴
+            log(f"[client] 丢弃过期响应 id={response.id}")
+            return
+        waiter.set_result(response)
+
+    def _on_incoming(self, raw: dict[str, Any]) -> None:
+        """MiClaw 发来的请求或通知。
+
+        这些方法都要求本 Agent 已注册：派发请求、通知对话结束，前提都是系统已经
+        认得这个 Agent。未登记处理函数的请求回 MC-2004，通知则忽略。
+        """
+        try:
+            msg = parse_incoming(raw)
+        except MiClawError as e:
+            if raw.get("id") is not None:
+                self._reply(error_response(raw["id"], e))
+            return
+
+        if isinstance(msg, JsonRpcNotification):
+            handler = self._notification_handlers.get(msg.method)
+            if handler is None or not self._registered:
+                log(f"[client] 忽略通知 {msg.method}")
+                return
+            try:
+                handler(msg.params or {})
+            except Exception as e:
+                log(f"[client] 处理通知 {msg.method} 出错: {e!r}")
+            return
+
+        handler = self._request_handlers.get(msg.method)
+        if handler is None:
+            self._reply(error_response(msg.id, MiClawError(
+                ErrorCode.MC_METHOD_NOT_FOUND, detail={"method": msg.method})))
+            return
+        if not self._registered:
+            self._reply(error_response(msg.id, MiClawError(
+                ErrorCode.MC_NOT_INITIALIZED, f"Agent 尚未注册，不能受理 {msg.method}",
+                detail={"method": msg.method})))
+            return
+        try:
+            outcome = handler(msg.params or {})
+        except Exception as e:
+            self._reply(self._failure(msg.id, e))
+            return
+        if isinstance(outcome, Future):
+            outcome.add_done_callback(lambda f, rid=msg.id: self._reply(
+                self._failure(rid, f.exception()) if f.exception()
+                else success_response(rid, f.result())))
+        else:
+            self._reply(success_response(msg.id, outcome))
+
+    @staticmethod
+    def _failure(request_id: RequestId, exc: BaseException) -> JsonRpcResponse:
+        """处理函数失败时的错误响应。
+
+        MC- 码原样回给对端；其余一律回 JSON-RPC 的 Internal error，不带 data ——
+        AG-* 码只在 Agent 侧，不上网络。
+        """
+        if isinstance(exc, MiClawError):
+            return error_response(request_id, exc)
+        log(f"[client] 受理请求 {request_id} 失败: {exc!r}")
+        return JsonRpcResponse(id=request_id,
+                               error=JsonRpcError(code=-32603, message="Agent 内部错误"))
+
+    def _reply(self, response: JsonRpcResponse) -> None:
+        try:
+            self._send(response.model_dump(exclude_none=True))
+        except MiClawError as e:          # 连接已断，回复送不出去
+            log(f"[client] 回复 {response.id} 未能送出: {e}")
+
+    def on_request(self, method: str, handler: RequestHandler) -> None:
+        """登记 MiClaw 发来的某种请求的处理函数。
+
+        处理函数在读线程里被调用：耗时的处理必须立刻返回一个 Future，
+        结果就绪后客户端再回复 —— 占住读线程，别的响应就都收不到了。
+        """
+        self._request_handlers[method] = handler
+
+    def on_notification(self, method: str, handler: NotificationHandler) -> None:
+        """登记 MiClaw 发来的某种通知的处理函数。在读线程里调用，必须很快返回。"""
+        self._notification_handlers[method] = handler
 
     @staticmethod
     def _to_exception(error: JsonRpcError) -> MiClawError:
@@ -224,6 +378,7 @@ class MiClawClient:
         except Exception as e:
             log(f"[client] 注销时出错（忽略）: {e}")
         self._transport.close()
+        self._reader.join(timeout=self._timeout)
 
     # ------------------------------------------------------------
 

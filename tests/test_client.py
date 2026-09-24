@@ -1,5 +1,7 @@
 """客户端测试。全部走真实子进程 + 真实管道，是名副其实的端到端测试。"""
 
+from types import SimpleNamespace
+
 import pytest
 
 from miagent.client import MiClawClient
@@ -116,31 +118,22 @@ class TestPerCallTimeout:
     这与「协议声明了字段却不执行」是同一类问题：约束写了等于没写。
     """
 
-    class _SpyTransport:
-        """转发给真实传输，同时记录每次 receive 用的超时值。"""
-
-        def __init__(self, inner):
-            self._inner = inner
-            self.timeouts: list[float | None] = []
-
-        def send(self, msg):
-            self._inner.send(msg)
-
-        def receive(self, timeout=None):
-            self.timeouts.append(timeout)
-            return self._inner.receive(timeout=timeout)
-
-        def close(self):
-            self._inner.close()
-
     @pytest.fixture
     def spied(self):
+        """记录每次等待响应用的超时值。超时在等单个响应时生效，不在传输层。"""
         from miagent.mock_server import MiClawMockServer
         from miagent.transport import LoopbackTransport
 
-        spy = self._SpyTransport(LoopbackTransport(MiClawMockServer()))
-        c = MiClawClient(timeout=10.0, transport=spy)
-        yield c, spy
+        c = MiClawClient(timeout=10.0, transport=LoopbackTransport(MiClawMockServer()))
+        timeouts: list[float | None] = []
+        wait = c._wait
+
+        def spy(waiter, timeout):
+            timeouts.append(timeout)
+            return wait(waiter, timeout)
+
+        c._wait = spy
+        yield c, SimpleNamespace(timeouts=timeouts)
         c.close()
 
     def test_falls_back_to_connection_timeout_before_handshake(self, spied):

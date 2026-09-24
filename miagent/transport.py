@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import io
 import json
+import queue
 import select
 import subprocess
 import sys
+import threading
 from typing import IO, Any
 
 from .protocol import ErrorCode, MiClawError
@@ -155,12 +157,21 @@ class LoopbackTransport:
       只是把管道换成了内存缓冲区。这样序列化行为与真实传输完全一致
       （比如 tuple 会变成 list、非字符串的 dict 键会被转成字符串），
       不会出现"回环能过、真管道跑不通"的情况。
+
+    与真实管道一样，receive 阻塞到有报文或连接关闭为止：客户端由一个读线程
+    持续接收。服务端若提供 attach(send)，回环把自己的投递通道交给它，
+    服务端主动发起的请求与通知由此到达客户端。
     """
 
     def __init__(self, server: Any) -> None:
         self._server = server
-        self._inbox: list[dict[str, Any]] = []
+        self._inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        # 客户端多个线程可能同时发送；服务端对象本身不是线程安全的
+        self._server_lock = threading.Lock()
         self._closed = False
+        attach = getattr(server, "attach", None)
+        if attach is not None:
+            attach(self._deliver)
 
     @staticmethod
     def _through_wire(msg: dict[str, Any]) -> dict[str, Any]:
@@ -173,15 +184,28 @@ class LoopbackTransport:
     def send(self, msg: dict[str, Any]) -> None:
         if self._closed:
             raise MiClawError(ErrorCode.MC_TRANSPORT_CLOSED, "回环已关闭")
-        response = self._server.handle(self._through_wire(msg))
-        if response is not None:          # 通知类报文无响应
-            self._inbox.append(self._through_wire(response))
+        with self._server_lock:
+            response = self._server.handle(self._through_wire(msg))
+        if response is not None:          # 通知与响应类报文无回复
+            self._deliver(response)
+
+    def _deliver(self, msg: dict[str, Any]) -> None:
+        """服务端 → 客户端。"""
+        if not self._closed:
+            self._inbox.put(self._through_wire(msg))
 
     def receive(self, timeout: float | None = None) -> dict[str, Any] | None:
-        return self._inbox.pop(0) if self._inbox else None
+        """读一条报文，阻塞到有报文为止。连接关闭返回 None；timeout 为秒，超时抛 MC-1003。"""
+        try:
+            return self._inbox.get(timeout=timeout)
+        except queue.Empty:
+            raise MiClawError(ErrorCode.MC_REQUEST_TIMEOUT, f"等待报文超过 {timeout}s",
+                              detail={"timeout_s": timeout}) from None
 
     def close(self) -> None:
-        self._closed = True
+        if not self._closed:
+            self._closed = True
+            self._inbox.put(None)         # 让阻塞中的 receive 返回，表示连接关闭
 
     def __enter__(self) -> "LoopbackTransport":
         return self

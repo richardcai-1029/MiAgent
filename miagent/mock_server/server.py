@@ -6,13 +6,19 @@
 
 from __future__ import annotations
 
+import itertools
+import threading
+from collections.abc import Callable
 from enum import StrEnum
 from typing import Any
 
 from ..protocol import (
     PROTOCOL_VERSION,
+    AgentMethod,
     ErrorCode,
     JsonRpcNotification,
+    JsonRpcRequest,
+    JsonRpcResponse,
     Method,
     MiClawError,
     ResourceBudget,
@@ -67,6 +73,51 @@ class MiClawMockServer:
         self.granted: set[str] = set()
         self.session_id: str | None = None
 
+        # 服务端主动发给 Agent 的报文走这条通道，由传输在 attach 时给出。
+        self._send: Callable[[dict[str, Any]], None] | None = None
+        self._out_ids = itertools.count(1)
+        # Agent 对服务端请求的回复，按请求 id 存放
+        self._replies: dict[str, dict[str, Any]] = {}
+        self._replies_cond = threading.Condition()
+
+    # ------------------------------------------------------------
+    # 服务端 → Agent：派发请求、通知对话结束
+    # ------------------------------------------------------------
+
+    def attach(self, send: Callable[[dict[str, Any]], None]) -> None:
+        """接上发往 Agent 的通道。"""
+        self._send = send
+
+    def dispatch_task(self, conversation_id: str, request: str,
+                      priority: str | None = None) -> str:
+        """把一个用户请求派给 Agent，返回这次请求的 id。回复用 reply_to 取。"""
+        params: dict[str, Any] = {"conversationId": conversation_id, "request": request}
+        if priority is not None:
+            params["priority"] = priority
+        request_id = f"miclaw-{next(self._out_ids)}"
+        self._push(JsonRpcRequest(id=request_id, method=AgentMethod.TASK_DISPATCH,
+                                  params=params))
+        return request_id
+
+    def end_conversation(self, conversation_id: str) -> None:
+        self._push(JsonRpcNotification(method=AgentMethod.CONVERSATION_END,
+                                       params={"conversationId": conversation_id}))
+
+    def reply_to(self, request_id: str, timeout: float | None = None) -> dict[str, Any]:
+        """等 Agent 对某个请求的回复，返回整条响应报文。"""
+        with self._replies_cond:
+            if not self._replies_cond.wait_for(lambda: request_id in self._replies, timeout):
+                raise TimeoutError(f"Agent 未在 {timeout}s 内回复 {request_id}")
+            return self._replies.pop(request_id)
+
+    def _push(self, msg: JsonRpcRequest | JsonRpcNotification) -> None:
+        if self._send is None:
+            raise RuntimeError("没有接上发往 Agent 的通道")
+        if self.state is not SessionState.REGISTERED:
+            raise RuntimeError(f"Agent 尚未注册（当前 {self.state}），不能向它派发")
+        log(f"[server] → Agent {msg.method}")
+        self._send(msg.model_dump(exclude_none=True))
+
     # ------------------------------------------------------------
     # 入口：处理一条报文
     # ------------------------------------------------------------
@@ -74,6 +125,9 @@ class MiClawMockServer:
     def handle(self, raw: dict[str, Any]) -> dict[str, Any] | None:
         """返回要回给对端的报文；返回 None 表示这是通知，不需要回复。"""
         req_id = raw.get("id")
+        if "method" not in raw and req_id is not None:
+            self._on_reply(raw)                            # Agent 对服务端请求的回复
+            return None
         try:
             msg = parse_incoming(raw)                      # 结构合法性 -> MC-2003
             method = self._resolve_method(msg.method)      # 方法是否存在 -> MC-2004
@@ -95,6 +149,16 @@ class MiClawMockServer:
                 req_id,
                 MiClawError(ErrorCode.MC_TOOL_EXECUTION_FAILED, detail={"reason": repr(e)}),
             ).model_dump(exclude_none=True)
+
+    def _on_reply(self, raw: dict[str, Any]) -> None:
+        try:
+            JsonRpcResponse.model_validate(raw)
+        except ValueError as e:
+            log(f"[server] ✗ 丢弃不合规的回复: {e}")
+            return
+        with self._replies_cond:
+            self._replies[str(raw["id"])] = raw
+            self._replies_cond.notify_all()
 
     def _resolve_method(self, raw_method: str) -> Method:
         try:

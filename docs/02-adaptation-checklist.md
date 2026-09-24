@@ -4,7 +4,7 @@
 |---|---|
 | 基础框架 | LangGraph `>=1.2,<2.0`（实测通过 1.2.10、1.2.11） |
 | 目标生态 | MiClaw 系统级 Agent 生态 · MiMo 端侧大模型 |
-| 文档版本 | v3.4 |
+| 文档版本 | v3.5 |
 
 本清单记录已完成并经测试验证的改造项。每项均给出落地位置、验证方式与**框架侵入面**，可逐条核查。
 
@@ -32,8 +32,9 @@ LangGraph 的工具调用是进程内 Python 函数调用，不存在跨进程�
 | A-4 | 会话无时序约束，任何时刻均可调用工具 | 握手状态机，以声明式状态表强制 `initialize → register → 调用` | `_REQUIRED_STATE`；违规返回 MC-2002 | L0 |
 | A-5 | 厂商扩展方法与标准方法无命名隔离 | 扩展方法统一 `miclaw/` 前缀，避免与未来标准 MCP 方法撞名 | `test_protocol.py::test_extensions_are_namespaced` | L0 |
 | A-6 | 无协议版本协商 | `initialize` 比对版本，不匹配返回 MC-2001 | `test_mock_server.py::test_version_mismatch` | L0 |
-| A-7 | 协议只有 Agent 调用系统的方向，系统把用户请求派给 Agent 的报文不存在；请求无优先级，多个请求同时到达时 Agent 无从区分谁更急 | 扩展 `miclaw/task.dispatch`（MiClaw → Agent）：对话标识、请求原文、请求优先级。优先级按「有没有人正在等这个回答」分为 `foreground` / `background` 两级而非数值，缺省按前台；响应只给回答与是否完成，AG-* 码不上网络。服务端受理的方法与 Agent 受理的方法分列两个枚举，反向发送返回 MC-2004。客户端接收服务端发起的请求需传输层分流，尚未实现 | `protocol/messages.py::AgentMethod` / `TaskDispatchParams` / `TaskDispatchResult`、`Runtime.dispatch`；`test_protocol.py::TestTaskDispatch`、`test_runtime.py::TestDispatch` | L0 |
+| A-7 | 协议只有 Agent 调用系统的方向，系统把用户请求派给 Agent 的报文不存在；请求无优先级，多个请求同时到达时 Agent 无从区分谁更急 | 扩展 `miclaw/task.dispatch`（MiClaw → Agent）：对话标识、请求原文、请求优先级。优先级按「有没有人正在等这个回答」分为 `foreground` / `background` 两级而非数值，缺省按前台；响应只给回答与是否完成，AG-* 码不上网络。服务端受理的方法与 Agent 受理的方法分列两个枚举，反向发送返回 MC-2004。经 A-9 的收发分流接到运行时 | `protocol/messages.py::AgentMethod` / `TaskDispatchParams` / `TaskDispatchResult`、`Runtime.dispatch`；`test_protocol.py::TestTaskDispatch`、`test_runtime.py::TestDispatch` | L0 |
 | A-8 | 系统无从告知 Agent 一段对话已结束，Agent 侧为对话保留的上下文只能一直留着 | 扩展 `miclaw/conversation.end` 通知（MiClaw → Agent，无回复），参数只有 `conversationId`；结束前已派发的请求照常执行完，此后同一标识视为新对话 | `protocol/messages.py::ConversationEndParams`、`Runtime.end_conversation`；`test_runtime.py::TestSessionReclaim` | L0 |
+| A-9 | 客户端只会读自己请求的响应：请求期间整段持锁、在 receive 上等，MiClaw 主动发来的请求无人接收；并发调用因此被锁串行化，图层的并行在 MiClaw 侧拿不到提速 | 读线程独占接收，按报文种类分流：带 method 的交给登记的处理函数（未登记回 MC-2004、未注册回 MC-2002），其余按 id 交给等它的调用。发出方只在分配 id 与写一行时持锁，等响应不持锁，多个请求同时在途；超时后到的响应丢弃，连接关闭时在途请求一并以 MC-1002 失败，坏行丢弃后继续读。耗时的处理函数返回 Future，处理完再回复，不占读线程；受理失败除报文不合规约外一律回 -32603 不带 data，AG-* 不上网络。`runtime.serve` 把派发请求与结束通知接到运行时。对并发服务端实测三个 300ms 调用 930ms → 305ms | `client.py::_read_loop` / `_route` / `_on_incoming`、`transport.py::LoopbackTransport`（阻塞接收、服务端主动投递）、`mock_server.dispatch_task`、`runtime.serve`；`test_demux.py` 19 条，含真实子进程管道与「处理 MiClaw 请求期间反向调用 MiClaw 工具」 | L0 |
 
 ### B · 错误处理体系
 
@@ -147,15 +148,15 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 43 | A 组全部、B 组全部、C-2、C-3、C-7、C-8、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、H-1、H-3 |
+| L0 | 44 | A 组全部、B 组全部、C-2、C-3、C-7、C-8、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、H-1、H-3 |
 | L1 | 5 | C-6、D-10、G-2、G-10、H-2 |
 | L2 | 2 | **G-5**、**G-11** |
 | L3 | 0 | — |
 
-合计 50 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
+合计 51 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
 B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增，
 D-6、D-7、D-8、D-9、D-10、G-9、G-10 为第 3 周新增，
-A-7、A-8、C-8、G-11、G-12 为多请求并发与调度优先级改造新增。
+A-7、A-8、A-9、C-8、G-11、G-12 为多请求并发与调度优先级改造新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，

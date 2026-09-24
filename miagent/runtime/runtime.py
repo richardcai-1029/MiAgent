@@ -20,6 +20,7 @@
 
 MiClaw 经 miclaw/task.dispatch 派来的请求由 dispatch 受理：对话标识即会话，
 协议里的请求优先级映射为这里的优先级；miclaw/conversation.end 由 end 受理。
+serve 把这两者登记到客户端上，报文从管道到运行时这一段就接通了。
 
 请求在线程池里执行：沿用同步实现，不引入事件循环。
 
@@ -33,15 +34,19 @@ import threading
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
 
 from ..graph.state import AgentState
 from ..memory.session import Agent, Session
-from ..protocol import (ConversationEndParams, RequestPriority, ResourceBudget,
-                        TaskDispatchParams, TaskDispatchResult)
+from ..protocol import (AgentMethod, ConversationEndParams, ErrorCode, MiClawError,
+                        RequestPriority, ResourceBudget, TaskDispatchParams,
+                        TaskDispatchResult)
 from .slots import SlotPool, request_key
 
 if TYPE_CHECKING:
+    from ..client import MiClawClient
     from ..llm import LLM
     from ..tools import ToolRegistry
 
@@ -56,6 +61,8 @@ MAX_IDLE_SESSIONS = MAX_INFLIGHT
 # 多出的调用会在推理栈内部按到达先后排队，优先级在那里不再起作用。
 # 1 对任何推理栈都成立。推理栈确实能并行服务多路时，按其实际能力调大。
 INFERENCE_SLOTS = 1
+
+_P = TypeVar("_P", bound=BaseModel)
 
 # 协议优先级到运行时优先级的映射：前台先于后台。
 PRIORITY_RANK = {RequestPriority.FOREGROUND: 1, RequestPriority.BACKGROUND: 0}
@@ -250,3 +257,39 @@ def build_runtime(llm: LLM, registry: ToolRegistry, budget: ResourceBudget, *,
                         **build_kwargs)
     return Runtime(agent, max_inflight=max_inflight, config=config,
                    max_idle_sessions=max_idle_sessions)
+
+
+def serve(runtime: Runtime, client: MiClawClient) -> None:
+    """把运行时登记到客户端上，受理 MiClaw 派来的请求与对话结束通知。
+
+    参数不合协议时回 MC-2003（协议层严格模式：字段缺失、多出或取值非法都算）。
+    派发请求立刻得到一个 Future，客户端在它完成后回复，读线程不被占住。
+    """
+
+    def on_dispatch(raw: dict[str, Any]) -> Future[dict[str, Any]]:
+        params = _parse(TaskDispatchParams, raw)
+        reply: Future[dict[str, Any]] = Future()
+
+        def done(f: Future[AgentState]) -> None:
+            if f.exception() is not None:
+                reply.set_exception(f.exception())
+            else:
+                reply.set_result(dispatch_result(f.result()).model_dump())
+
+        runtime.dispatch(params).add_done_callback(done)
+        return reply
+
+    def on_end(raw: dict[str, Any]) -> None:
+        runtime.end_conversation(_parse(ConversationEndParams, raw))
+
+    client.on_request(AgentMethod.TASK_DISPATCH, on_dispatch)
+    client.on_notification(AgentMethod.CONVERSATION_END, on_end)
+
+
+def _parse(model: type[_P], raw: dict[str, Any]) -> _P:
+    try:
+        return model.model_validate(raw)
+    except ValidationError as e:
+        raise MiClawError(ErrorCode.MC_INVALID_MESSAGE, f"{model.__name__} 不合协议",
+                          detail={"errors": e.errors(include_url=False,
+                                                     include_context=False)}) from None
