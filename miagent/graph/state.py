@@ -55,6 +55,9 @@ class Task(TypedDict):
     result: str | None
     error: str | None           # 失败时的错误码
     retry_count: int
+    # 规划序号：模型给出这一步的先后。id 是模型起的名字，按字符串排序时
+    # task_10 会排在 task_2 之前；需要「原本的顺序」时一律看它。
+    seq: int
 
 
 def append_or_reset(old: list[Any], new: list[Any]) -> list[Any]:
@@ -118,7 +121,7 @@ class Anchor(TypedDict):
     """目标锚：一次请求里不变的部分。行为见 miagent.memory.anchor。"""
 
     goal: str               # 用户目标原文
-    intent: list[str]       # 首次拆解的各步描述，按任务 id 排序
+    intent: list[str]       # 首次拆解的各步描述，按规划序号排列
 
 
 class Turn(TypedDict):
@@ -186,6 +189,7 @@ def new_task(
     required_tool: str,
     arguments: dict[str, Any] | None = None,
     dependencies: list[str] | None = None,
+    seq: int = 0,
 ) -> Task:
     return Task(
         id=task_id,
@@ -197,6 +201,7 @@ def new_task(
         result=None,
         error=None,
         retry_count=0,
+        seq=seq,
     )
 
 

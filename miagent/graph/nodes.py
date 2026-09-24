@@ -53,24 +53,26 @@ from .state import (
 # ============================================================
 
 
-def _build_tasks(specs: list[Any], prefix: str = "") -> dict[str, Task]:
+def _build_tasks(specs: list[Any], prefix: str = "", start: int = 0) -> dict[str, Task]:
     """把模型产出的 TaskSpec 列表转成运行时任务图。
 
     prefix 用于重规划：新任务的 id 加前缀，避免与已完成任务撞名。
     依赖与参数引用里指向新任务的 id 同步加前缀，指向已完成任务的保持原样。
+
+    规划序号按模型输出的顺序从 start 起编；重规划时接着保留任务的序号往后编。
 
     参数里的引用会派生出依赖边（见 dataflow 模块）：模型只要写了引用，
     先后关系就已经确定，不必再指望它在 dependencies 里重复声明一遍。
     """
     new_ids = {s.id: prefix + s.id for s in specs}
     tasks: dict[str, Task] = {}
-    for s in specs:
+    for i, s in enumerate(specs, start):
         arguments = dataflow.remap_references(s.arguments, new_ids)
         deps = [new_ids.get(d, d) for d in s.dependencies]
         derived = dataflow.referenced_ids(arguments) - set(deps)
         tasks[new_ids[s.id]] = new_task(
             new_ids[s.id], s.description, s.required_tool, arguments,
-            deps + sorted(derived))
+            deps + sorted(derived), seq=i)
     return tasks
 
 
@@ -103,7 +105,8 @@ def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
                              "模型未能产出合法任务图", detail=e.detail) from e
         raise
 
-    tasks = {**(keep or {}), **_build_tasks(parsed.tasks, prefix)}
+    start = max((t["seq"] for t in (keep or {}).values()), default=-1) + 1
+    tasks = {**(keep or {}), **_build_tasks(parsed.tasks, prefix, start)}
     dag.validate(tasks)          # 结构非法 -> AG-1004
 
     # 规模合理性：拆得过细会白白消耗端侧算力，每一步都是一次真实调用。

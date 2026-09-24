@@ -140,10 +140,12 @@ class TestAncestors:
 
 
 class TestAnchor:
-    def test_intent_follows_task_id_order(self):
-        tasks = {"t2": pending("t2"), "t1": pending("t1")}
+    def test_intent_follows_plan_order_not_id_order(self):
+        """按字符串排 id，task_10 会排在 task_2 之前。"""
+        tasks = {f"task_{i}": new_task(f"task_{i}", f"第 {i} 步", "echo", seq=i - 1)
+                 for i in (10, 2, 1, 3, 4, 5, 6, 7, 8, 9)}
         a = anchor.build("订餐", tasks)
-        assert a == {"goal": "订餐", "intent": ["任务 t1", "任务 t2"]}
+        assert a["intent"] == [f"第 {i} 步" for i in range(1, 11)]
 
     def test_render_is_not_reducible(self):
         section = anchor.render(anchor.build("订餐", {"t1": pending("t1")}))

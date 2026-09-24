@@ -124,16 +124,47 @@ def ancestors(tasks: Tasks, roots: set[str]) -> set[str]:
 # ============================================================
 
 
+def downstream_depth(tasks: Tasks) -> dict[str, int]:
+    """每个未终结任务之后最长还串着几个未终结任务（叶子为 0）。
+
+    只沿未终结的任务计：已完成的不必再跑，已失败的不会再跑，
+    它们都不在剩余的执行路径上。
+    """
+    live = {tid for tid, t in tasks.items()
+            if t["status"] not in (TaskStatus.DONE, TaskStatus.FAILED)}
+    dependents: dict[str, list[str]] = {tid: [] for tid in live}
+    for tid in live:
+        for dep in tasks[tid]["dependencies"]:
+            if dep in live:
+                dependents[dep].append(tid)
+
+    depth: dict[str, int] = {}
+
+    def visit(tid: str) -> int:           # validate 已保证无环
+        if tid not in depth:
+            depth[tid] = max((visit(c) + 1 for c in dependents[tid]), default=0)
+        return depth[tid]
+
+    for tid in live:
+        visit(tid)
+    return depth
+
+
 def ready(tasks: Tasks) -> list[str]:
-    """返回现在就能执行的任务 id。
+    """返回现在就能执行的任务 id，按派发优先级排好序。
 
     判定条件：
 
         status 为 pending / ready  且  所有 dependencies 都已 done
 
     返回的是【列表】而不是单个 —— 长度大于 1 就意味着这些任务之间
-    没有依赖关系，可以并行派发。串行实现取第一个即可，
-    将来接 LangGraph 的 Send 做并行时，直接用整个列表。
+    没有依赖关系，可以并行派发。
+
+    顺序只在并发配额放不下全部就绪任务时起作用：排在前面的这一轮派发，
+    其余顺延。每一轮要等本轮全部结束才进入下一轮，顺延了关键路径上的任务，
+    整张图就多跑一轮。因此按下游最长链从长到短排，同长按规划序号：
+
+        key = (-下游最长链长度, 规划序号, id)
     """
     out = []
     for tid, task in tasks.items():
@@ -141,7 +172,8 @@ def ready(tasks: Tasks) -> list[str]:
             continue
         if all(tasks[d]["status"] is TaskStatus.DONE for d in task["dependencies"]):
             out.append(tid)
-    return sorted(out)
+    depth = downstream_depth(tasks)
+    return sorted(out, key=lambda tid: (-depth[tid], tasks[tid]["seq"], tid))
 
 
 def cascade_failures(tasks: Tasks) -> Tasks:

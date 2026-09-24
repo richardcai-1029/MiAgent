@@ -426,6 +426,42 @@ def test_model_is_confined_to_planning_nodes():
 REF = "$from"
 
 
+class TestDispatchOrder:
+    """并发配额放不下全部就绪任务时，先派发关键路径上的任务。"""
+
+    def _rounds(self, registry, first):
+        out = build_agent(llm_for(first), registry, max_concurrent_miclaw=2,
+                          retry_delay_ms=0, verify=False).invoke(
+            initial_state("查五个时段的天气"), {"recursion_limit": 80})
+        assert out["failure"] is None
+        return [line for line in out["trace"]
+                if line.startswith("scheduler: 本轮就绪")]
+
+    def test_critical_path_is_not_deferred(self, registry):
+        # task_1、task_2 是叶子；task_3 → task_4 → task_5 是一条链。
+        # 先派两个叶子要跑四轮，先派链头只要三轮。
+        weather = "system.query_weather"
+        first = plan(task("task_1", weather, when="t1"),
+                     task("task_2", weather, when="t2"),
+                     task("task_3", weather, when="t3"),
+                     task("task_4", weather, ["task_3"], when="t4"),
+                     task("task_5", weather, ["task_4"], when="t5"))
+        rounds = self._rounds(registry, first)
+        assert len(rounds) == 3
+        assert "task_3(miclaw), task_1(miclaw)" in rounds[0]
+
+    def test_plan_order_survives_ten_or_more_tasks(self, registry):
+        tasks = [task(f"task_{i}", "echo", text=str(i)) for i in range(1, 12)]
+        out = build_agent(llm_for(plan(*tasks)), registry, retry_delay_ms=0,
+                          verify=False).invoke(initial_state("回显"),
+                                               {"recursion_limit": 80})
+        dispatched = next(line for line in out["trace"]
+                          if line.startswith("scheduler: 本轮就绪"))
+        names = dispatched.split("→ ")[1].split(", ")
+        assert names == [f"task_{i}(local)" for i in range(1, 12)]
+        assert out["anchor"]["intent"][:3] == ["任务 task_1", "任务 task_2", "任务 task_3"]
+
+
 class TestToolChaining:
     """上游工具的结果作为下游工具的参数 —— 缺了它，多个工具只是多次
     互不相干的调用，构不成联动。"""

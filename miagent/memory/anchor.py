@@ -23,7 +23,8 @@ __all__ = ["Anchor", "build", "render"]
 
 
 def build(goal: str, tasks: dict[str, Task]) -> Anchor:
-    return Anchor(goal=goal, intent=[tasks[tid]["description"] for tid in sorted(tasks)])
+    ordered = sorted(tasks.values(), key=lambda t: t["seq"])
+    return Anchor(goal=goal, intent=[t["description"] for t in ordered])
 
 
 def render(anchor: Anchor) -> Section:

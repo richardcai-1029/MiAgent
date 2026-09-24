@@ -82,6 +82,31 @@ class TestReady:
         assert dag.ready(t) == ["B", "C"]
 
 
+class TestReadyOrder:
+    """就绪任务的派发顺序：关键路径优先，同长按规划序号。"""
+
+    def test_longer_downstream_chain_goes_first(self):
+        t = mk(("t1", []), ("t2", []), ("t3", []), ("t4", ["t3"]), ("t5", ["t4"]))
+        assert dag.ready(t) == ["t3", "t1", "t2"]
+
+    def test_depth_counts_the_longest_chain_not_the_fan_out(self):
+        # A 下面挂三个叶子（深 1），B 下面一条两节的链（深 2）
+        t = mk(("A", []), ("a1", ["A"]), ("a2", ["A"]), ("a3", ["A"]),
+               ("B", []), ("b1", ["B"]), ("b2", ["b1"]))
+        assert dag.downstream_depth(t)["A"] == 1
+        assert dag.downstream_depth(t)["B"] == 2
+        assert dag.ready(t) == ["B", "A"]
+
+    def test_finished_tasks_are_not_on_the_remaining_path(self):
+        t = mark(mk(("A", []), ("B", []), ("C", ["B"]), ("D", ["C"])),
+                 C=TaskStatus.FAILED, D=TaskStatus.FAILED)
+        assert dag.downstream_depth(t)["B"] == 0
+
+    def test_ties_follow_plan_order_not_id_string(self):
+        t = {f"task_{i}": new_task(f"task_{i}", "", "t", seq=i) for i in (10, 2, 1)}
+        assert dag.ready(t) == ["task_1", "task_2", "task_10"]
+
+
 class TestCascadeFailures:
     def test_direct_dependent_fails(self):
         t = dag.cascade_failures(mark(mk(("A", []), ("B", ["A"])), A=TaskStatus.FAILED))
