@@ -8,3 +8,7 @@ __pycache__/
 
 # 周报的 PDF 由 reports/*.md 生成，不入库
 reports/*.pdf
+
+# 评测数据集由 bench/suite/generate.py 确定性生成（约 22 MB），不入库；
+# 统计与校验和见 bench/data/manifest.json
+bench/data/cases.jsonl
