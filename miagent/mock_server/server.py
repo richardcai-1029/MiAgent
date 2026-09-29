@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import itertools
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import Any
 
@@ -30,7 +30,7 @@ from ..protocol import (
     text_content,
 )
 from ..transport import log
-from .tools import TOOL_REGISTRY
+from .tools import TOOL_REGISTRY, SystemTool
 
 
 class SessionState(StrEnum):
@@ -63,8 +63,11 @@ class MiClawMockServer:
         self,
         budget: ResourceBudget | None = None,
         user_denied: set[str] | None = None,
+        tools: Mapping[str, SystemTool] | None = None,
     ) -> None:
         self.state = SessionState.CONNECTED
+        # 服务端提供的工具。缺省为演示工具；评测换成自己的工具目录。
+        self.tools = tools if tools is not None else TOOL_REGISTRY
         # mock 用的配额值，无外部依据；取得偏紧只为让 capture_screen
         # 这类重工具能触发 MC-4001，便于验证资源约束路径
         self.budget = budget or ResourceBudget(max_memory_mb=64)
@@ -244,7 +247,7 @@ class MiClawMockServer:
         模型就会规划出注定失败的步骤 —— 白烧一轮推理，端侧尤其浪费。
         """
         visible, hidden = [], []
-        for tool in TOOL_REGISTRY.values():
+        for tool in self.tools.values():
             if tool.required_permission is None or tool.required_permission in self.granted:
                 visible.append(
                     ToolDescriptor(
@@ -265,7 +268,7 @@ class MiClawMockServer:
         args = params.get("arguments") or {}
 
         # ① 工具存在吗
-        tool = TOOL_REGISTRY.get(name)
+        tool = self.tools.get(name)
         if tool is None:
             raise MiClawError(ErrorCode.MC_TOOL_NOT_FOUND, detail={"name": name})
 
