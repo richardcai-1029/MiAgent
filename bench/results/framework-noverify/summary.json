@@ -1,0 +1,18 @@
+{
+  "cases": 10000,
+  "tool_latency_ms": 0,
+  "verify": false,
+  "data": "/Users/caijicheng/projects/MiAgent/bench/data/cases.jsonl",
+  "resources": {
+    "samples": 2171,
+    "rss_start_mb": 185.98,
+    "rss_peak_mb": 196.8,
+    "rss_end_mb": 49.2,
+    "rss_slope_mb_per_1k": -18.923,
+    "cpu_avg_pct": 25.6,
+    "cpu_peak_pct": 100.4,
+    "threads_peak": 6,
+    "cpu_seconds": 114.2,
+    "wall_seconds": 446.19
+  }
+}

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
+INFRA = "AG-5001"
 MANIFEST = Path(__file__).resolve().parents[1] / "data" / "manifest.json"
 CHECKS = ("status", "effects", "calls", "forbidden", "order", "quota", "answer")
 CATEGORY_ORDER = ("single", "parallel", "chain", "fan_in", "fan_out", "diamond", "mixed",
@@ -272,6 +273,9 @@ def model_plan(md: list[str], m: dict[str, Any]) -> None:
     if not rows:
         return
     rows = _rescore(rows)
+    # 推理服务不可达（AG-5001，实测为服务端 502）不是模型的行为，不计入准确率
+    infra = [r for r in rows if r["plan_failure"] == INFRA]
+    rows = [r for r in rows if r["plan_failure"] != INFRA]
     summ = json.loads((RESULTS / "model-plan" / "summary.json").read_text())
     share = json.loads(MANIFEST.read_text())["by_category"] if MANIFEST.exists() else {}
     total = sum(share.values()) or 1
@@ -294,8 +298,7 @@ def model_plan(md: list[str], m: dict[str, Any]) -> None:
     allm = agg(rows)
     by = groups(rows, lambda r: [r["category"]])
     cats = {c: agg(v) for c, v in by.items()}
-    weighted = {key: sum(cats[c][key] * share.get(c, 0) for c in cats) / total
-                for key in ("tool_f1", "edge_f1")}
+    weighted: dict[str, float] = {}
     weighted["exact"] = sum(cats[c]["exact"] / cats[c]["turns"] * share.get(c, 0) for c in cats) / total
     weighted["calls"] = sum((cats[c]["calls_ok"] / cats[c]["n_gold"] if cats[c]["n_gold"] else 1.0)
                             * share.get(c, 0) for c in cats if cats[c]["n_gold"]) / \
@@ -308,16 +311,18 @@ def model_plan(md: list[str], m: dict[str, Any]) -> None:
             codes[r["plan_failure"]] += 1
     md.append("### 工具调用准确率（模型侧，规划节点）\n")
     md.append(f"按类别分层抽样 {summ.get('cases')} 条用例（每类 {summ.get('per_category')} 条）、"
-              f"{len(rows):,} 轮。\n")
+              f"{len(rows) + len(infra):,} 轮；其中 {len(infra)} 轮推理服务返回 502（AG-5001），"
+              f"不是模型的输出，不计入以下指标，按 {len(rows):,} 轮统计。\n")
+    m["model_plan"]["infra_failures"] = len(infra)
     md.append(table(["指标", "抽样整体", "按数据集加权"], [
         ["工具选择 精确率 / 召回率 / F1",
          f"{allm['tool_p'] * 100:.2f}% / {allm['tool_r'] * 100:.2f}% / {allm['tool_f1'] * 100:.2f}%",
-         f"F1 {weighted['tool_f1'] * 100:.2f}%"],
+         "—"],
         ["调用完全正确率（工具与参数全对）", pct(allm["calls_ok"], allm["n_gold"]), f"{weighted['calls'] * 100:.2f}%"],
         ["参数准确率", pct(allm["args_ok"], allm["args_total"]), "—"],
         ["依赖边 精确率 / 召回率 / F1",
          f"{allm['edge_p'] * 100:.2f}% / {allm['edge_r'] * 100:.2f}% / {allm['edge_f1'] * 100:.2f}%",
-         f"F1 {weighted['edge_f1'] * 100:.2f}%"],
+         "—"],
         ["整图完全匹配率", pct(allm["exact"], allm["turns"]), f"{weighted['exact'] * 100:.2f}%"],
         ["规划失败（未产出可执行计划）", pct(allm["failed"], allm["turns"]), "—"],
         ["经自修复的轮次", pct(allm["repaired"], allm["turns"]), "—"],
@@ -328,10 +333,10 @@ def model_plan(md: list[str], m: dict[str, Any]) -> None:
     md.append(f"标准里没有、模型自行补上的参数 {allm['extra_args']} 个；"
               f"多轮里重做上一轮已做过的调用 {allm['forbidden_hits']} 次。\n")
     md.append(table(["类别", "轮数", "工具 F1", "调用完全正确率", "依赖边 F1", "整图匹配率", "规划失败"],
-                    [[CATEGORY_CN[c], cats[c]["turns"], f"{cats[c]['tool_f1'] * 100:.1f}%",
+                    [[CATEGORY_CN[c], cats[c]["turns"],
+                      f"{cats[c]['tool_f1'] * 100:.1f}%" if cats[c]["n_gold"] else "—",
                       pct(cats[c]["calls_ok"], cats[c]["n_gold"], ci=False) if cats[c]["n_gold"] else "—",
-                      f"{cats[c]['edge_f1'] * 100:.1f}%" if cats[c]["edge_p"] != 1.0 or cats[c]["edge_r"] != 1.0
-                      or any(r["edges_gold"] for r in by[c]) else "—",
+                      f"{cats[c]['edge_f1'] * 100:.1f}%" if any(r["edges_gold"] for r in by[c]) else "—",
                       pct(cats[c]["exact"], cats[c]["turns"], ci=False), cats[c]["failed"]]
                      for c in CATEGORY_ORDER if c in cats]))
     md.append("")
@@ -377,6 +382,19 @@ def model_e2e(md: list[str], m: dict[str, Any]) -> None:
     fails = {c: sum(1 for r in rows if r[c] is False) for c in CHECKS}
     m["model_e2e"]["check_failures"] = fails
     md.append("逐项检查未通过的轮数：" + "、".join(f"{c} {v}" for c, v in fails.items()) + "。\n")
+    infra = [r for r in rows if (r["error"] and INFRA in r["error"]) or r["failure"] == INFRA]
+    rest = [r for r in rows if r not in infra]
+    kr = sum(r["success"] for r in rest)
+    m["model_e2e"]["infra_turns"] = len(infra)
+    m["model_e2e"]["rate_excl_infra"] = wilson(kr, len(rest))
+    md.append(f"其中 {len(infra)} 轮遇到推理服务返回 502（AG-5001）；其中 "
+              f"{sum(1 for r in infra if r['error'])} 轮的异常从收尾节点直接抛出、请求没有得到回答。"
+              f"去掉这些轮次，成功 {kr} / {len(rest)}，{pct(kr, len(rest))}。\n")
+    codes: dict[str, int] = defaultdict(int)
+    for r in rows:
+        if not r["success"] and r["failure"]:
+            codes[r["failure"]] += 1
+    md.append("未成功轮次的错误码：" + "、".join(f"{c} {v}" for c, v in sorted(codes.items())) + "。\n")
 
 
 def speed(md: list[str], m: dict[str, Any]) -> None:

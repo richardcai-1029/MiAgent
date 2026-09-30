@@ -12,3 +12,10 @@ reports/*.pdf
 # 评测数据集由 bench/suite/generate.py 确定性生成（约 22 MB），不入库；
 # 统计与校验和见 bench/data/manifest.json
 bench/data/cases.jsonl
+
+# 评测结果：框架侧与并发的逐条数据、资源采样与运行日志可在十分钟内重跑得到，不入库；
+# 各目录的 summary.json、模型侧结果（重跑需数小时）与汇总的 metrics.json、tables.md 入库
+bench/results/*.log
+bench/results/framework-*/turns.jsonl
+bench/results/framework-*/resources.json
+bench/results/concurrency-*/requests.jsonl

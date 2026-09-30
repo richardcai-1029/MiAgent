@@ -1,0 +1,46 @@
+{
+  "mode": "plan",
+  "deployment": {
+    "base_url": "http://192.168.3.121:11434/v1",
+    "model": "qwen3-8b:latest",
+    "ollama": "0.34.2",
+    "details": {
+      "parent_model": "qwen3-8b-q4km.gguf",
+      "format": "gguf",
+      "family": "qwen3",
+      "families": [
+        "qwen3"
+      ],
+      "parameter_size": "8.2B",
+      "quantization_level": "Q4_K_M"
+    },
+    "parameters": "temperature                    0.6\ntop_p                          0.95\nnum_ctx                        8192",
+    "size_bytes": 5988784536,
+    "size_vram_bytes": 5988784536,
+    "context_length": 8192
+  },
+  "context_limit_chars": 16000,
+  "started": "2026-09-29 22:12:02",
+  "per_category": 100,
+  "seed": 20260929,
+  "cases": 1100,
+  "turns": 1227,
+  "resources": {
+    "samples": 8835,
+    "rss_start_mb": 176.05,
+    "rss_peak_mb": 176.05,
+    "rss_end_mb": 41.64,
+    "rss_slope_mb_per_1k": 14.643,
+    "cpu_avg_pct": 0.3,
+    "cpu_peak_pct": 10.0,
+    "threads_peak": 3,
+    "cpu_seconds": 28.0,
+    "wall_seconds": 8882.79
+  },
+  "llm_stats": {
+    "calls": 1492,
+    "total_ms": 8671744.46,
+    "avg_ms": 5812.16,
+    "repairs": 316
+  }
+}

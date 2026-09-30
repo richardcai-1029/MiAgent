@@ -1,0 +1,22 @@
+{
+  "inflight": 4,
+  "cases": 1500,
+  "tool_latency_ms": 20.0,
+  "capacity": 2,
+  "max_active_calls": 2,
+  "makespan_s": 64.248,
+  "throughput_rps": 23.35,
+  "tool_calls": 4110,
+  "resources": {
+    "samples": 594,
+    "rss_start_mb": 192.17,
+    "rss_peak_mb": 242.41,
+    "rss_end_mb": 188.42,
+    "rss_slope_mb_per_1k": -38.602,
+    "cpu_avg_pct": 25.0,
+    "cpu_peak_pct": 85.5,
+    "threads_peak": 15,
+    "cpu_seconds": 16.2,
+    "wall_seconds": 64.25
+  }
+}

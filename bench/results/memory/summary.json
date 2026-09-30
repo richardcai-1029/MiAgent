@@ -1,0 +1,93 @@
+{
+  "rss_after_import_mb": 73.41,
+  "rss_after_warmup_mb": 74.83,
+  "request_peak_heap_mb": {
+    "p50": 0.543,
+    "p95": 0.603,
+    "p99": 0.631,
+    "max": 0.698
+  },
+  "heap_slope_mb_per_1k": 0.1765,
+  "objects_slope_per_1k": 29.5,
+  "rss_slope_mb_per_1k": -1.855,
+  "series": [
+    {
+      "done": 250,
+      "heap_mb": 0.302,
+      "rss_mb": 75.05,
+      "objects": 87475
+    },
+    {
+      "done": 500,
+      "heap_mb": 0.367,
+      "rss_mb": 75.69,
+      "objects": 87496
+    },
+    {
+      "done": 750,
+      "heap_mb": 0.427,
+      "rss_mb": 75.91,
+      "objects": 87515
+    },
+    {
+      "done": 1000,
+      "heap_mb": 0.474,
+      "rss_mb": 76.59,
+      "objects": 87508
+    },
+    {
+      "done": 1250,
+      "heap_mb": 0.523,
+      "rss_mb": 77.98,
+      "objects": 87527
+    },
+    {
+      "done": 1500,
+      "heap_mb": 0.566,
+      "rss_mb": 77.66,
+      "objects": 87537
+    },
+    {
+      "done": 1750,
+      "heap_mb": 0.599,
+      "rss_mb": 78.59,
+      "objects": 87535
+    },
+    {
+      "done": 2000,
+      "heap_mb": 0.661,
+      "rss_mb": 77.59,
+      "objects": 87566
+    },
+    {
+      "done": 2250,
+      "heap_mb": 0.695,
+      "rss_mb": 76.83,
+      "objects": 87556
+    },
+    {
+      "done": 2500,
+      "heap_mb": 0.717,
+      "rss_mb": 76.89,
+      "objects": 87545
+    },
+    {
+      "done": 2750,
+      "heap_mb": 0.76,
+      "rss_mb": 67.75,
+      "objects": 87560
+    },
+    {
+      "done": 3000,
+      "heap_mb": 0.802,
+      "rss_mb": 68.78,
+      "objects": 87563
+    }
+  ],
+  "idle_session": {
+    "sessions": 200,
+    "turns": 473,
+    "heap_per_session_kb": 3.22
+  },
+  "cases": 3000
+}
