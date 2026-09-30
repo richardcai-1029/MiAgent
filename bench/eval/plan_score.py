@@ -9,7 +9,10 @@
           那个模型任务
   依赖    依赖边经配对映射后与标准依赖边比较（含由引用派生的边）
   调用    一个标准任务算「调用正确」：配上了、且参数全部正确
-  整图    工具一一对应、参数全对、依赖边相同、没有多余任务
+  整图    工具一一对应、参数全对、依赖边相同、没有多余任务，且「做不成的操作」
+          报得对（见下）
+  做不成  请求里有没有对应工具的操作（能力不支持、所需权限被拒）时，模型应在
+          unsupported_actions 里列出；做得成的请求不应列出任何一项
 
 模型多填了标准里没有的可选参数（如自作主张补上出行方式）单独计数，不计入参数准确率。
 """
@@ -63,7 +66,8 @@ def match(model: list[dict[str, Any]], gold: list[dict[str, Any]],
 
 def score_plan(model: list[dict[str, Any]], gold: list[dict[str, Any]],
                accept: dict[str, dict[str, list[Any]]],
-               forbidden: list[dict[str, Any]]) -> dict[str, Any]:
+               forbidden: list[dict[str, Any]],
+               infeasible: bool = False, flagged: list[str] | None = None) -> dict[str, Any]:
     pairs = match(model, gold, accept)
     by_model = {m["id"]: m for m in model}
     back = {mid: gid for gid, mid in pairs.items()}
@@ -115,8 +119,11 @@ def score_plan(model: list[dict[str, Any]], gold: list[dict[str, Any]],
         and (f["arguments"] is None or m["arguments"] == f["arguments"]))
 
     tools_exact = sorted(m["required_tool"] for m in model) == sorted(g["required_tool"] for g in gold)
+    # flagged 为 None 表示没有记下模型报的做不成（该字段加入之前的结果），这一项不计
+    unsupported_ok = None if flagged is None else bool(flagged) == infeasible
     exact = (tools_exact and len(pairs) == len(gold) == len(model)
-             and calls_ok == len(gold) and model_edges == gold_edges)
+             and calls_ok == len(gold) and model_edges == gold_edges
+             and unsupported_ok is not False)
     return {
         "n_gold": len(gold), "n_model": len(model), "tp": len(pairs),
         "args_total": args_total, "args_ok": args_ok, "calls_ok": calls_ok,
@@ -124,5 +131,6 @@ def score_plan(model: list[dict[str, Any]], gold: list[dict[str, Any]],
         "edges_gold": len(gold_edges), "edges_model": len(model_edges), "edges_hit": edges_hit,
         "order_edges_gold": len(order_edges), "order_edges_hit": len(order_edges & model_edges),
         "arg_errors": arg_errors,
+        "unsupported_ok": unsupported_ok,
         "tools_exact": tools_exact, "exact": exact, "forbidden_hits": forbidden_hits,
     }

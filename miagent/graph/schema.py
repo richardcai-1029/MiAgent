@@ -52,8 +52,24 @@ class TaskSpec(BaseModel):
     _no_stringified_references = field_validator("arguments")(_reject_stringified_references)
 
 
-_UNFULFILLABLE_DESCRIPTION = ("用户目标中没有任何可用工具能完成的部分，每项一句话；"
-                              "不要用无关的工具去顶替这些部分。全部都能做或无需工具时为空数组")
+_UNSUPPORTED_DESCRIPTION = ("用户要求设备去执行、但可用工具里没有对应能力的操作，每项一句话；"
+                            "不要用无关的工具去顶替它们。闲聊、常识问答、计算这类直接回答即可的"
+                            "内容不是操作，不要写进来。没有这类操作时为空数组")
+
+
+# 单独一问「是不是直接回答即可」：端侧量级的模型只看 unsupported_actions 的说明时，
+# 常把闲聊、计算原句写进去（Qwen3-8B 小样本实测）；先判这一问，
+# 直接回答类请求的做不成列表由框架忽略，闲聊不再被报为未达成。
+_DIRECT_ANSWER_DESCRIPTION = ("用户只是闲聊、提问常识或要求计算，不需要设备执行任何操作、"
+                              "直接回答即可时为 true；否则为 false")
+
+
+def _require_direct_answer(schema: dict[str, Any]) -> None:
+    """交给模型的 schema 里把 direct_answer 列为必填：有默认值的字段不在必填列表里，
+    模型就不写它（实测）。校验仍接受缺省，旧格式的计划照常可用。"""
+    required = schema.setdefault("required", [])
+    if "direct_answer" not in required:
+        required.append("direct_answer")
 
 
 def _check_structure(tasks: list[Any], known: Sequence[str] = ()) -> None:
@@ -86,12 +102,13 @@ def _check_structure(tasks: list[Any], known: Sequence[str] = ()) -> None:
 
 
 class TaskPlan(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_require_direct_answer)
 
     tasks: list[TaskSpec] = Field(
         description="任务列表；任务间通过 dependencies 表达先后关系，"
                     "无依赖关系的任务可并行执行。无需工具时为空数组")
-    unfulfillable: list[str] = Field(default_factory=list, description=_UNFULFILLABLE_DESCRIPTION)
+    unsupported_actions: list[str] = Field(default_factory=list, description=_UNSUPPORTED_DESCRIPTION)
+    direct_answer: bool = Field(default=False, description=_DIRECT_ANSWER_DESCRIPTION)
 
     @model_validator(mode="after")
     def _structure(self) -> TaskPlan:
@@ -143,9 +160,10 @@ def task_plan_model_for(tool_names: Sequence[str], known: Sequence[str] = ()) ->
 
     return create_model(
         "TaskPlanConstrained",
-        __config__=ConfigDict(extra="forbid"),
+        __config__=ConfigDict(extra="forbid", json_schema_extra=_require_direct_answer),
         tasks=(list[spec], Field(description="任务列表；无依赖的任务可并行")),
-        unfulfillable=(list[str], Field(default_factory=list, description=_UNFULFILLABLE_DESCRIPTION)),
+        unsupported_actions=(list[str], Field(default_factory=list, description=_UNSUPPORTED_DESCRIPTION)),
+        direct_answer=(bool, Field(default=False, description=_DIRECT_ANSWER_DESCRIPTION)),
         __validators__={"_structure": model_validator(mode="after")(structure)},
     )
 

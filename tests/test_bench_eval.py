@@ -147,3 +147,10 @@ def test_ablation_without_verification_is_detected():
     assert drift
     rows = [row for case in drift for row in run_case(case, verify=False)]
     assert not all(r["success"] for r in rows)
+
+
+def test_plan_unsupported_flag():
+    assert score_plan([], [], {}, [], infeasible=True, flagged=["订机票"])["exact"]
+    assert not score_plan([], [], {}, [], infeasible=False, flagged=["聊天"])["exact"]
+    assert not score_plan([], [], {}, [], infeasible=True, flagged=[])["exact"]
+    assert score_plan([], [], {}, [], infeasible=True)["unsupported_ok"] is None

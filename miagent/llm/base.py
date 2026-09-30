@@ -212,7 +212,8 @@ class LLM(ABC):
     # ------------------------------------------------------------
 
     def complete_structured(self, messages: list[LLMMessage], schema: type[T],
-                            max_repairs: int = 1) -> T:
+                            max_repairs: int = 1,
+                            refit: Callable[[int], list[LLMMessage]] | None = None) -> T:
         """要求模型返回符合 schema 的结构化结果。
 
         调用方只声明「我要这个形状的数据」，怎么保证由实现层决定：
@@ -225,8 +226,15 @@ class LLM(ABC):
 
         schema 由 Pydantic 模型自动导出，与校验用的是同一个定义，
         不存在「提示词写的格式」和「实际校验的格式」不一致的可能。
+
+        refit(extra) 由调用方给出：按首次拼提示词的同一套规则，再多腾出 extra
+        的位置，返回重拼的消息。自修复要回传上一次的原输出，窗口放不下时靠它
+        削减低优先级片段腾位置，而不是丢掉原输出 —— 看不到自己写了什么，
+        模型往往原样再犯。
         """
-        convo = [*messages, _schema_message(schema)]
+        schema_message = _schema_message(schema)
+        convo = [*messages, schema_message]
+        tail: list[LLMMessage] = []           # 自修复追加的原输出与反馈
 
         last_error = ""
         for attempt in range(max_repairs + 1):
@@ -242,24 +250,36 @@ class LLM(ABC):
                         detail={"schema": schema.__name__, "errors": last_error,
                                 "raw": raw[:200]},
                     ) from e
-                # ★ 自修复的关键：不是原样重试，而是把「你上次错在哪」喂回去。
-                #   上次的原输出一并回传，模型看得到自己写了什么；窗口放不下原输出时
-                #   只回传错误说明 —— 调用方按 structured_reserve 为这条说明留了位置，
-                #   因此自修复不会因为上一次输出太长而超窗。
+                # ★ 自修复的关键：不是原样重试，而是把「你上次错在哪」连同上次的
+                #   原输出一起喂回去，模型看得到自己写了什么（见 _repair_convo）。
                 self.repair_count += 1
                 feedback = _repair_message(last_error)
-                echoed = [*convo, assistant(raw), feedback]
-                if sum(self.estimate(m.content) for m in echoed) <= self.context_limit:
-                    convo = echoed
-                else:
-                    convo = [*convo, feedback]
+                tail = [*tail, assistant(raw), feedback]
+                convo = self._repair_convo(messages, schema_message, tail, refit)
 
         raise AssertionError("unreachable")
 
+    def _repair_convo(self, messages: list[LLMMessage], schema_message: LLMMessage,
+                      tail: list[LLMMessage],
+                      refit: Callable[[int], list[LLMMessage]] | None) -> list[LLMMessage]:
+        """自修复的对话：原输出与反馈接在后面。放不下时先重拼提示词腾位置；
+        仍放不下（或调用方没给 refit）才退到只回传最后一条错误说明。"""
+        size = lambda ms: sum(self.estimate(m.content) for m in ms)  # noqa: E731
+        convo = [*messages, schema_message, *tail]
+        if size(convo) <= self.context_limit:
+            return convo
+        if refit is not None:
+            # structured_reserve 已为一条反馈留了位置，超出的部分由重拼腾出
+            extra = max(0, size(tail) - self.estimate(_repair_message("x" * REPAIR_ERROR_CHARS).content))
+            convo = [*refit(extra), schema_message, *tail]
+            if size(convo) <= self.context_limit:
+                return convo
+        return [*messages, schema_message, tail[-1]]
+
     def structured_reserve(self, schema: type[BaseModel]) -> int:
         """complete_structured 在调用方的消息之外要占用的预算：注入的 schema 说明，
-        加一条最长的自修复反馈。调用方拼提示词时从窗口里扣掉它，
-        首次调用与自修复就都不会超窗。"""
+        加一条最长的自修复反馈。调用方拼提示词时从窗口里扣掉它，首次调用就不会
+        超窗；自修复还要回传上一次的原输出，那部分位置由 refit 重拼时腾出。"""
         return (self.estimate(_schema_message(schema).content)
                 + self.estimate(_repair_message("x" * REPAIR_ERROR_CHARS).content))
 

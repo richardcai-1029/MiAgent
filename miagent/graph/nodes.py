@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
-from ..llm import system, user
+from ..llm import LLMMessage, system, user
 from ..llm.context import Section, choose, fit, join
 from ..memory import anchor as anchor_mod, ledger
 from ..memory.episodic import Line
@@ -80,7 +80,7 @@ def _build_tasks(specs: list[Any], prefix: str = "", start: int = 0) -> dict[str
 def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
           keep: dict[str, Task] | None = None) -> tuple[dict[str, Task], list[str], list[str]]:
     """要求模型产出任务图，并做结构校验。返回任务图、上下文削减说明，
-    以及模型认定没有工具能完成的部分（见 TaskPlan.unfulfillable）。
+    以及模型认定没有工具能完成的部分（见 TaskPlan.unsupported_actions）。
 
     提示词按预算拼装：端侧窗口小，工具一多、历史一长就会触顶，
     此时削减低优先级片段，而不是直接拒绝（见 llm/context.py）。
@@ -99,8 +99,13 @@ def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
     reserve = deps.llm.structured_reserve(model) + deps.llm.estimate(role)
     body, notes = fit(sections, deps.llm.context_limit - reserve, deps.llm.estimate)
 
+    def refit(extra: int) -> list[LLMMessage]:
+        """自修复要回传原输出时，按同一套削减规则再腾出 extra 的位置。"""
+        more, _ = fit(sections, deps.llm.context_limit - reserve - extra, deps.llm.estimate)
+        return [system(role), user(more)]
+
     try:
-        parsed = deps.llm.complete_structured([system(role), user(body)], model)
+        parsed = deps.llm.complete_structured([system(role), user(body)], model, refit=refit)
     except AgentError as e:
         if e.code is ErrorCode.AG_LLM_INVALID_RESPONSE:
             # 分层：模型层说「输出不合 schema」，规划层说「没能产出可执行计划」
@@ -121,7 +126,8 @@ def _plan(deps: Deps, role: str, sections: list[Section], prefix: str = "",
             ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED,
             f"计划拆出 {planned} 个任务，超过累计执行预算 {MAX_TOTAL_EXECUTIONS}",
             detail={"planned": planned, "budget": MAX_TOTAL_EXECUTIONS})
-    return tasks, notes, list(parsed.unfulfillable)
+    # 直接回答类请求没有「做不成的操作」，模型列出的也不算（见 schema 的说明）
+    return tasks, notes, [] if parsed.direct_answer else list(parsed.unsupported_actions)
 
 
 def _tools_section(registry: ToolRegistry, names: set[str] | None = None,
@@ -181,15 +187,15 @@ _PLANNER_ROLE = (
     "（不要把它加引号写成字符串），先后关系会由此自动确定。"
     "若给出了对话历史，当前目标承接其中的结论：已有的结论直接使用，"
     "不要再规划任务重复查询。"
-    "闲聊、常识问答这类不需要工具的目标，任务列表为空。"
-    "目标中没有任何可用工具能完成的部分，写进 unfulfillable，"
-    "不要用不相干的工具去顶替。"
+    "闲聊、常识问答、计算这类直接回答即可的目标，任务列表与 unsupported_actions 都为空，"
+    "由收尾直接回答。用户要求设备去执行、但没有任何可用工具能完成的操作，"
+    "写进 unsupported_actions，不要用不相干的工具去顶替。"
 )
 
 
 def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
     try:
-        tasks, notes, unfulfilled = _plan(deps, _PLANNER_ROLE, [
+        tasks, notes, unsupported = _plan(deps, _PLANNER_ROLE, [
             _tools_section(deps.registry),
             # 对话历史每轮一段，越旧越先削减；没有历史时这里为空。
             *render_history(state.get("history", [])),
@@ -203,9 +209,9 @@ def planner(state: AgentState, deps: Deps) -> dict[str, Any]:
                 "trace": [f"planner: 规划失败 {e.code}"]}
 
     layers = dag.parallel_layers(tasks)
-    undo = f"；无法完成：{'、'.join(unfulfilled)}" if unfulfilled else ""
+    undo = f"；无法完成：{'、'.join(unsupported)}" if unsupported else ""
     return {
-        "tasks": tasks, "verdict": None, "unfulfilled": unfulfilled,
+        "tasks": tasks, "verdict": None, "unsupported": unsupported,
         # 目标锚在这里写入，此后只读：之后每一轮重规划都以首次拆解为参照。
         "anchor": anchor_mod.build(state["user_request"], tasks),
         "trace": [f"planner: {len(tasks)} 个任务，{len(layers)} 层依赖 → {layers}"
@@ -495,9 +501,9 @@ def verify_goal(state: AgentState, deps: Deps) -> dict[str, Any]:
     s = ledger.survey(state["tasks"], state["episodes"])
     # 规划已认定做不成的部分收尾时自会报未达成；这里只判能做的部分做完没有，
     # 否则会为一件没有工具能做的事去重规划。
-    unfulfilled = state.get("unfulfilled") or []
+    unsupported = state.get("unsupported") or []
     known = ([Section("无法完成", "以下部分没有可用工具，已确定无法完成，判断时不计入：\n"
-                      + "\n".join(f"  · {u}" for u in unfulfilled))] if unfulfilled else [])
+                      + "\n".join(f"  · {u}" for u in unsupported))] if unsupported else [])
     try:
         review, _, notes = _review(deps, _GOAL_VERIFIER_ROLE, [
             anchor_mod.render(state["anchor"]),
@@ -637,7 +643,7 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
            " 原任务图中有任务失败了，请基于已完成的结果重新规划【剩余】工作，"
            "避开失败的做法。")
     try:
-        merged, notes, unfulfilled = _plan(
+        merged, notes, unsupported = _plan(
             deps,
             _PLANNER_ROLE.replace("任务规划器", "任务重规划器")
             + why + "新任务可以依赖已完成任务的 id。",
@@ -665,11 +671,11 @@ def replanner(state: AgentState, deps: Deps) -> dict[str, Any]:
     # standing：完成校验判定的未达成没有对应的失败任务，重规划交白卷时
     # 那个码必须留住，否则「没补上缺口」会被当成「没有问题」。
     a = ledger.accept(s, merged, standing=state.get("failure"), clear=deps.verify)
-    known = state.get("unfulfilled") or []
+    known = state.get("unsupported") or []
     out: dict[str, Any] = {
         "tasks": a.tasks, "episodes": s.new_episodes, "dispatch": [], "verdict": None,
         "failure": a.failure, "replan_count": s.generation, "gap": None,
-        "unfulfilled": known + [u for u in unfulfilled if u not in known],
+        "unsupported": known + [u for u in unsupported if u not in known],
     }
     if a.repeated:
         out["errors"] = [{"stage": "replanner", "code": a.failure, "repeated": a.repeated}]
@@ -696,14 +702,14 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
 
     # 规划认定有做不成的部分：即使能做的都做完了，目标也没有达成。
     # 这一条不依赖执行 —— 请求里的事全都做不成时，本轮一次工具都不会调。
-    unfulfilled = state.get("unfulfilled") or []
+    unsupported = state.get("unsupported") or []
     failure = state.get("failure")
-    if failure is None and unfulfilled:
+    if failure is None and unsupported:
         failure = ErrorCode.AG_GOAL_NOT_ACHIEVED.value
     state = {**state, "failure": failure}
 
-    if unfulfilled:
-        ask = (f"以下部分没有可用的工具，无法完成：{'；'.join(unfulfilled)}。"
+    if unsupported:
+        ask = (f"以下部分没有可用的工具，无法完成：{'；'.join(unsupported)}。"
                f"回答请说明做成了什么、哪些做不到，不要声称做到了做不到的部分。")
         if state["failure"] != ErrorCode.AG_GOAL_NOT_ACHIEVED.value:
             ask += f"另有失败：{_failure_text(state['failure'])}。"
@@ -722,15 +728,21 @@ def finalizer(state: AgentState, deps: Deps) -> dict[str, Any]:
     role = "你是端侧智能助理。回答要简洁，只说结论，不复述过程。"
     # 与 _plan 相同：给注入的 schema 说明与自修复反馈留出位置。
     reserve = deps.llm.structured_reserve(FinalOutput) + deps.llm.estimate(role)
+    sections = [
+        Section("用户目标", f"用户目标：{state['user_request']}"),
+        # 执行明细可能很长。逐条削减，超长的结果先让位：其余记录的结论还在，
+        # 回答与本轮摘要才写得出具体内容 —— 摘要是下一轮唯一能承接的上文。
+        *_records("执行情况", c.history, 2, empty="  （未执行任何任务）"),
+        Section("要求", ask),
+    ]
+
+    def refit(extra: int) -> list[LLMMessage]:
+        more, _ = fit(sections, deps.llm.context_limit - reserve - extra, deps.llm.estimate)
+        return [system(role), user(more)]
+
     try:
-        body, notes = fit([
-            Section("用户目标", f"用户目标：{state['user_request']}"),
-            # 执行明细可能很长。逐条削减，超长的结果先让位：其余记录的结论还在，
-            # 回答与本轮摘要才写得出具体内容 —— 摘要是下一轮唯一能承接的上文。
-            *_records("执行情况", c.history, 2, empty="  （未执行任何任务）"),
-            Section("要求", ask),
-        ], deps.llm.context_limit - reserve, deps.llm.estimate)
-        output = deps.llm.complete_structured([system(role), user(body)], FinalOutput)
+        body, notes = fit(sections, deps.llm.context_limit - reserve, deps.llm.estimate)
+        output = deps.llm.complete_structured([system(role), user(body)], FinalOutput, refit=refit)
         answer, turn_summary = output.answer, output.summary
         note = _trace_trim(notes)
     except AgentError as e:

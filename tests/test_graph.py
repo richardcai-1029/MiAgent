@@ -961,11 +961,11 @@ class TestFinalizerNeverRaises:
         assert "模型不可达" in out["trace"][-1]
 
 
-class TestUnfulfillable:
+class TestUnsupportedActions:
     """规划认定没有工具能做的部分：不执行也要报告未达成。"""
 
-    def _llm(self, tasks, unfulfillable, done=None):
-        first = json.dumps({"tasks": tasks, "unfulfillable": unfulfillable}, ensure_ascii=False)
+    def _llm(self, tasks, unsupported_actions, done=None):
+        first = json.dumps({"tasks": tasks, "unsupported_actions": unsupported_actions}, ensure_ascii=False)
         return llm_for(first, done=done)
 
     def test_nothing_doable_is_not_reported_as_completed(self, registry):
@@ -977,6 +977,17 @@ class TestUnfulfillable:
         out = run(registry, "你好", self._llm([], []))
         assert out["failure"] is None
 
+    def test_direct_answer_ignores_listed_actions(self, registry):
+        """模型判为直接回答时，它顺手列出的「做不成」不算 —— 闲聊没有要执行的操作。"""
+        first = json.dumps({"tasks": [], "unsupported_actions": ["12 乘 3 等于几"],
+                            "direct_answer": True}, ensure_ascii=False)
+        out = run(registry, "12 乘 3 等于几", llm_for(first))
+        assert out["failure"] is None and out["unsupported"] == []
+
+    def test_schema_asks_the_model_for_direct_answer(self):
+        from miagent.graph.schema import task_plan_model_for
+        assert "direct_answer" in task_plan_model_for(["echo"]).model_json_schema()["required"]
+
     def test_doable_part_runs_and_turn_is_unmet(self, registry):
         prompts = []
 
@@ -985,7 +996,7 @@ class TestUnfulfillable:
             return goal()
 
         llm = llm_for(json.dumps({"tasks": [task("t1", "echo", text="A")],
-                                  "unfulfillable": ["订机票"]}, ensure_ascii=False))
+                                  "unsupported_actions": ["订机票"]}, ensure_ascii=False))
         responder = llm._responder
         llm._responder = lambda m: goal_check(m) if "完成校验器" in m[0].content else responder(m)
         out = run(registry, "复述并订机票", llm)

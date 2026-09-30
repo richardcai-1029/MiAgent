@@ -178,7 +178,7 @@ class AgentState(TypedDict, total=False):
     gap: str | None
     # 规划认定没有任何可用工具能完成的部分（能力不支持、所需工具因权限不可见）。
     # 这一轮的事实，不因重规划清除：非空时收尾以「目标未达成」结束。
-    unfulfilled: list[str]
+    unsupported: list[str]
 
     # 非空表示任务未完成，值为错误码。
     # 清除规则只有一条：成功的重规划清除它（新计划按构造覆盖了全部失败记录），
@@ -229,6 +229,6 @@ def initial_state(user_request: str) -> AgentState:
         final_answer="",
         turn_summary="",
         gap=None,
-        unfulfilled=[],
+        unsupported=[],
         failure=None,
     )

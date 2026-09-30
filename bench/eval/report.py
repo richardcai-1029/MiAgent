@@ -223,7 +223,8 @@ def concurrency(md: list[str], m: dict[str, Any]) -> None:
     md.append("")
 
 
-ERROR_CN = {"plan_failed": "未产出可执行计划", "spurious_action": "无需工具却调用了工具",
+ERROR_CN = {"plan_failed": "未产出可执行计划", "false_unsupported": "做得成却报做不成",
+            "missed_unsupported": "做不成却没报", "spurious_action": "无需工具却调用了工具",
             "substitute": "做不到的部分用无关工具顶替", "tool_missing": "漏了应调用的工具",
             "tool_extra": "多调了工具", "argument": "参数错误", "dependency": "依赖关系错误",
             "correct": "完全正确"}
@@ -233,6 +234,8 @@ def classify_plan_error(r: dict[str, Any], infeasible: bool) -> str:
     """一轮规划的主要错误，按列出的先后取第一个成立的。"""
     if r["plan_failure"]:
         return "plan_failed"
+    if r.get("unsupported_ok") is False:
+        return "missed_unsupported" if infeasible else "false_unsupported"
     if r["n_gold"] == 0 and r["n_model"] > 0:
         return "spurious_action"
     if infeasible and r["n_model"] > r["tp"]:
@@ -259,10 +262,10 @@ def _rescore(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in rows:
         case = cases[r["case"]]
         turn = case["turns"][r["turn"]]
-        s = score_plan(r["model_tasks"], turn["gold"]["tasks"], turn.get("accept") or {},
-                       turn["forbidden"])
-        row = {**r, **s}
         infeasible = case["category"] in ("unsupported", "permission_denied")
+        s = score_plan(r["model_tasks"], turn["gold"]["tasks"], turn.get("accept") or {},
+                       turn["forbidden"], infeasible, r.get("model_unsupported"))
+        row = {**r, **s}
         row["error_class"] = classify_plan_error(row, infeasible)
         out.append(row)
     return out

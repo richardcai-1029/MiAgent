@@ -96,6 +96,11 @@ def _history(case: dict[str, Any], upto: int) -> list[Turn]:
 # ---------------- plan ----------------
 
 
+def _infeasible(case: dict[str, Any]) -> bool:
+    """请求里有没有对应工具的操作：能力不支持，或所需权限被拒。"""
+    return case["category"] in ("unsupported", "permission_denied")
+
+
 def run_plan(cases: list[dict[str, Any]], out: Path) -> None:
     llm = _llm()
     with (out / "turns.jsonl").open("w", encoding="utf-8") as f, Sampler(1.0) as sampler:
@@ -117,7 +122,7 @@ def run_plan(cases: list[dict[str, Any]], out: Path) -> None:
                                 "arguments": t["arguments"], "dependencies": t["dependencies"]}
                                for t in res["tasks"].values()]
                 s = score_plan(model_tasks, turn["gold"]["tasks"], turn.get("accept") or {},
-                               turn["forbidden"])
+                               turn["forbidden"], _infeasible(case), res.get("unsupported"))
                 f.write(json.dumps({
                     "case": case["id"], "turn": i, "category": case["category"],
                     "level": case["level"], "tags": case["tags"], **s,
@@ -125,6 +130,7 @@ def run_plan(cases: list[dict[str, Any]], out: Path) -> None:
                     "error": error,
                     "wall_ms": round(wall, 1), "repairs": llm.repair_count - rep0,
                     "llm": llm.records[r0:], "model_tasks": model_tasks,
+                    "model_unsupported": res.get("unsupported") or [],
                 }, ensure_ascii=False) + "\n")
                 f.flush()
             env.close()

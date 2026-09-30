@@ -126,6 +126,27 @@ class TestStructuredOutput:
         assert sum(len(m.content) for m in last) <= llm.context_limit
         assert _schema_message(Plan).content in [m.content for m in last]
 
+    def test_repair_refits_prompt_to_keep_the_echo(self):
+        """原输出放不下时，调用方重拼一份更短的提示词腾位置，原输出照样回传。"""
+        from miagent.graph.schema import TaskPlan as Plan
+
+        llm = FakeLLM(context_limit=4000)
+        room = llm.context_limit - llm.structured_reserve(Plan)
+        asked: list[int] = []
+
+        def refit(extra):
+            asked.append(extra)
+            return [user("x" * (room - extra))]
+
+        raw = "不合规" * 200
+        outs = iter([raw, '{"tasks":[]}'])
+        llm._responder = lambda m: next(outs)
+        assert llm.complete_structured([user("x" * room)], Plan, refit=refit).tasks == []
+        last = llm.seen[-1]
+        assert asked and asked[0] >= len(raw) - 400
+        assert any(m.role == "assistant" and m.content == raw for m in last)
+        assert sum(len(m.content) for m in last) <= llm.context_limit
+
     def test_repair_echoes_output_when_it_fits(self):
         from miagent.graph.schema import TaskPlan as Plan
         outs = iter(['{"plan":[]}', '{"tasks":[]}'])

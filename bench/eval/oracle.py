@@ -7,7 +7,7 @@
 各节点的作答规则（理想模型应当怎样回答）：
 
   规划      给出标准任务图；请求里有做不成的部分（能力不支持、权限被拒）时
-            在 unfulfillable 里列出；按 simulate 漏掉一步或写偏一个参数；
+            在 unsupported_actions 里列出；按 simulate 漏掉一步或写偏一个参数；
             首次输出按 planner_noise 加格式偏差，自修复时给出干净的输出
   重规划    给出还没做成、且能做成的任务：主计划里参考执行判为能完成而尚未
             成功调用的任务，加上备选计划里尚未成功调用的任务。引用已完成的
@@ -112,7 +112,7 @@ class OracleLLM(FakeLLM):
             for t in tasks:
                 if t["id"] == d["task"]:
                     t["arguments"] = {**t["arguments"], d["param"]: d["value"]}
-        clean = json.dumps({"tasks": tasks, "unfulfillable": self._unfulfillable()},
+        clean = json.dumps({"tasks": tasks, "unsupported_actions": self._unsupported_actions()},
                            ensure_ascii=False)
         noise, self._noise_pending = self._noise_pending, None
         return _noisy(clean, tasks, noise) if noise else clean
@@ -120,7 +120,7 @@ class OracleLLM(FakeLLM):
     def _infeasible(self) -> bool:
         return self.case["category"] in ("unsupported", "permission_denied")
 
-    def _unfulfillable(self) -> list[str]:
+    def _unsupported_actions(self) -> list[str]:
         return ["请求中有没有可用工具能完成的部分"] if self._infeasible() else []
 
     def _replan(self) -> str:
