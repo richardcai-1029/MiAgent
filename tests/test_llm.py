@@ -109,6 +109,30 @@ class TestStructuredOutput:
         assert ei.value.code is ErrorCode.AG_LLM_INVALID_RESPONSE
         assert llm.call_count == 3                     # 原始 1 次 + 修复 2 次
 
+    def test_repair_within_reserve_never_overflows(self):
+        """调用方按 structured_reserve 预留后，上一次输出再长，自修复也不超窗：
+        放不下原输出时只回传错误说明。"""
+        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.llm.base import _schema_message
+
+        llm = FakeLLM(context_limit=4000)
+        body = "x" * (llm.context_limit - llm.structured_reserve(Plan))
+        outs = iter(["不合规" * 3000, '{"tasks":[]}'])
+        llm._responder = lambda m: next(outs)
+        assert llm.complete_structured([user(body)], Plan).tasks == []
+        last = llm.seen[-1]
+        assert all(m.role != "assistant" for m in last)          # 原输出没有回传
+        assert "不符合要求" in last[-1].content
+        assert sum(len(m.content) for m in last) <= llm.context_limit
+        assert _schema_message(Plan).content in [m.content for m in last]
+
+    def test_repair_echoes_output_when_it_fits(self):
+        from miagent.graph.schema import TaskPlan as Plan
+        outs = iter(['{"plan":[]}', '{"tasks":[]}'])
+        llm = FakeLLM(responder=lambda m: next(outs))
+        llm.complete_structured([user("t")], Plan)
+        assert [m.role for m in llm.seen[-1]][-2:] == ["assistant", "user"]
+
     def test_tool_name_enum_rejects_hallucination(self):
         """工具名收进 enum 后，幻觉在校验阶段即被拒。"""
         from miagent.graph.schema import task_plan_model_for as plan_model_for

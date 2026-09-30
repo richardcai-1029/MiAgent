@@ -226,11 +226,7 @@ class LLM(ABC):
         schema 由 Pydantic 模型自动导出，与校验用的是同一个定义，
         不存在「提示词写的格式」和「实际校验的格式」不一致的可能。
         """
-        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False, indent=2)
-        convo = [*messages, system(
-            f"你的回复必须是、且只能是符合下面 JSON Schema 的 JSON。"
-            f"不要输出任何解释、前言或代码块标记。\n\n{schema_json}"
-        )]
+        convo = [*messages, _schema_message(schema)]
 
         last_error = ""
         for attempt in range(max_repairs + 1):
@@ -246,13 +242,26 @@ class LLM(ABC):
                         detail={"schema": schema.__name__, "errors": last_error,
                                 "raw": raw[:200]},
                     ) from e
-                # ★ 自修复的关键：不是原样重试，而是把「你上次错在哪」喂回去
+                # ★ 自修复的关键：不是原样重试，而是把「你上次错在哪」喂回去。
+                #   上次的原输出一并回传，模型看得到自己写了什么；窗口放不下原输出时
+                #   只回传错误说明 —— 调用方按 structured_reserve 为这条说明留了位置，
+                #   因此自修复不会因为上一次输出太长而超窗。
                 self.repair_count += 1
-                convo = [*convo, assistant(raw), user(
-                    f"上面的输出不符合要求：{last_error}\n"
-                    f"请重新输出，只给合法 JSON，不要有其他内容。")]
+                feedback = _repair_message(last_error)
+                echoed = [*convo, assistant(raw), feedback]
+                if sum(self.estimate(m.content) for m in echoed) <= self.context_limit:
+                    convo = echoed
+                else:
+                    convo = [*convo, feedback]
 
         raise AssertionError("unreachable")
+
+    def structured_reserve(self, schema: type[BaseModel]) -> int:
+        """complete_structured 在调用方的消息之外要占用的预算：注入的 schema 说明，
+        加一条最长的自修复反馈。调用方拼提示词时从窗口里扣掉它，
+        首次调用与自修复就都不会超窗。"""
+        return (self.estimate(_schema_message(schema).content)
+                + self.estimate(_repair_message("x" * REPAIR_ERROR_CHARS).content))
 
     def _complete_structured(self, messages: list[LLMMessage], schema: type[T]) -> str:
         """默认走普通补全。原生支持结构化输出的实现应覆写此方法。
@@ -273,6 +282,23 @@ class LLM(ABC):
             "avg_ms": round(self.total_elapsed_ms / self.call_count, 2) if self.call_count else 0.0,
             "repairs": self.repair_count,
         }
+
+
+# 自修复反馈里错误说明的长度上限：够写下几个字段的错误，
+# 也让 structured_reserve 能给出确定的预留量。
+REPAIR_ERROR_CHARS = 200
+
+
+def _schema_message(schema: type[BaseModel]) -> LLMMessage:
+    """注入给模型的格式说明。预算估算与实际注入共用这一份。"""
+    schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False, indent=2)
+    return system(f"你的回复必须是、且只能是符合下面 JSON Schema 的 JSON。"
+                  f"不要输出任何解释、前言或代码块标记。\n\n{schema_json}")
+
+
+def _repair_message(error: str) -> LLMMessage:
+    return user(f"上一次的输出不符合要求：{error[:REPAIR_ERROR_CHARS]}\n"
+                f"请重新输出，只给合法 JSON，不要有其他内容。")
 
 
 def _summarize_errors(exc: Exception) -> str:

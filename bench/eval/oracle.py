@@ -6,13 +6,15 @@
 
 各节点的作答规则（理想模型应当怎样回答）：
 
-  规划      给出标准任务图；按 simulate 漏掉一步或写偏一个参数；
+  规划      给出标准任务图；请求里有做不成的部分（能力不支持、权限被拒）时
+            在 unfulfillable 里列出；按 simulate 漏掉一步或写偏一个参数；
             首次输出按 planner_noise 加格式偏差，自修复时给出干净的输出
   重规划    给出还没做成、且能做成的任务：主计划里参考执行判为能完成而尚未
             成功调用的任务，加上备选计划里尚未成功调用的任务。引用已完成的
             任务时用它在框架里的 id
   结果校验  实际参数与参考执行一致即通过；不一致判未通过，给出标准参数作修正
-  完成校验  这一轮能完成的任务都已成功调用、且目标本身可达成时判达成
+  完成校验  这一轮能完成的任务都已成功调用、且目标本身可达成时判达成；
+            做不成的部分已由规划列出，不计入判断
   收尾      固定格式的回答与摘要
 
 「成功调用」取自环境探针的记录，与框架自己的状态无关。
@@ -110,9 +112,16 @@ class OracleLLM(FakeLLM):
             for t in tasks:
                 if t["id"] == d["task"]:
                     t["arguments"] = {**t["arguments"], d["param"]: d["value"]}
-        clean = json.dumps({"tasks": tasks}, ensure_ascii=False)
+        clean = json.dumps({"tasks": tasks, "unfulfillable": self._unfulfillable()},
+                           ensure_ascii=False)
         noise, self._noise_pending = self._noise_pending, None
         return _noisy(clean, tasks, noise) if noise else clean
+
+    def _infeasible(self) -> bool:
+        return self.case["category"] in ("unsupported", "permission_denied")
+
+    def _unfulfillable(self) -> list[str]:
+        return ["请求中有没有可用工具能完成的部分"] if self._infeasible() else []
 
     def _replan(self) -> str:
         self._generation += 1
@@ -163,7 +172,7 @@ class OracleLLM(FakeLLM):
 
     def _goal(self) -> str:
         missing = [self._tasks[t]["description"] for t in self._achievable_ids() if not self._done(t)]
-        if self.turn["expected"]["achievable"] and not missing:
+        if not missing and (self.turn["expected"]["achievable"] or self._infeasible()):
             return json.dumps({"achieved": True, "gap": ""}, ensure_ascii=False)
         gap = "还没有完成：" + "、".join(missing) if missing else "请求中有无法完成的部分"
         return json.dumps({"achieved": False, "gap": gap}, ensure_ascii=False)

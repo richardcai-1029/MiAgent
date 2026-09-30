@@ -65,11 +65,12 @@ def check_turn(case: dict[str, Any], i: int, prior_results: list[Any]) -> None:
     fallback = (turn["fallback"] or {}).get("tasks") or []
 
     # 框架自己的 schema 与结构校验
-    model = task_plan_model_for(_visible(case["permissions"]))
+    visible = _visible(case["permissions"])
     strip = lambda t: {k: v for k, v in t.items() if k != "replaces"}  # noqa: E731
-    for plan in (gold, fallback):
+    # 备选计划可以依赖主计划里的任务，与重规划可以依赖已完成任务同理
+    for plan, known in ((gold, []), (fallback, [t["id"] for t in gold])):
         if plan:
-            model.model_validate({"tasks": [strip(t) for t in plan]})
+            task_plan_model_for(visible, known).model_validate({"tasks": [strip(t) for t in plan]})
     tasks = {t["id"]: new_task(t["id"], t["description"], t["required_tool"], t["arguments"],
                                t["dependencies"]) for t in gold}
     dag.validate(tasks)

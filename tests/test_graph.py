@@ -310,18 +310,35 @@ class TestEndToEnd:
         assert out["execution_summary"]["failed"] == ["t1"]
 
     def test_cyclic_plan_rejected_before_execution(self, registry):
-        """带环的任务图在规划阶段即被拒，一步都不执行。"""
+        """带环的任务图在 schema 校验阶段即被拒，自修复仍改不对就一步都不执行。"""
         out = run(registry, "绕圈", llm_for(plan(
             task("a", "system.query_weather", ["b"], when="今晚"),
             task("b", "system.query_calendar", ["a"], when="今晚"))))
-        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert out["execution_count"] == 0
         assert out["final_answer"]
 
     def test_dangling_dependency_rejected(self, registry):
         out = run(registry, "依赖不存在的任务", llm_for(plan(
             task("a", "system.query_weather", ["nope"], when="今晚"))))
-        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
+
+    def test_structural_error_is_repaired(self, registry):
+        """结构错误与格式错误一样喂回给模型：第二次给出合法的图就照常执行。"""
+        plans = [plan(task("a", "system.query_weather", ["nope"], when="今晚")),
+                 plan(task("a", "system.query_weather", when="今晚"))]
+
+        def responder(msgs):
+            role = msgs[0].content
+            if "规划器" in role:
+                assert len(plans) == 2 or "不存在的任务 nope" in msgs[-1].content
+                return plans.pop(0)
+            return final()
+
+        out = run(registry, "查天气", FakeLLM(responder=responder))
+        assert out["failure"] is None
+        assert out["execution_count"] == 1
+        assert not plans                  # 两份计划都用上了：第一份被拒，第二份执行
 
     def test_hallucinated_tool_rejected_at_planning(self, registry):
         """工具名进了 schema 的 enum，幻觉在解析阶段就被拒。"""
@@ -503,7 +520,7 @@ class TestToolChaining:
         out = run(registry, "复述", llm_for(plan(
             task("t2", "echo", text={REF: "nope"}),
         )))
-        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert out["execution_count"] == 0
 
     def test_reference_cycle_is_rejected_before_execution(self, registry):
@@ -511,7 +528,7 @@ class TestToolChaining:
             task("t1", "echo", text={REF: "t2"}),
             task("t2", "echo", text={REF: "t1"}),
         )))
-        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert out["execution_count"] == 0
 
     def test_parallel_branches_feed_one_downstream_task(self, registry):
@@ -761,12 +778,13 @@ class TestFailureIsClearedOnlyByRecovery:
                  task("t2", "echo", ["t1"], text="B"),
                  task("t3", "join", left="只给了一个参数")),
             replan=plan(task("t4", "echo", ["nope"], text="C"))))    # 依赖不存在
-        assert out["failure"] == ErrorCode.AG_INVALID_PLAN.value
+        assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert "t2" in out["execution_summary"]["completed"]
 
     def test_later_successful_replan_clears_an_earlier_failed_one(self, registry):
         """第二次重规划看到了全部失败记录并覆盖了剩余工作，恢复发生了。"""
-        replans = [plan(task("t4", "echo", ["nope"], text="C")),      # 第一次：依赖不存在
+        bad = plan(task("t4", "echo", ["nope"], text="C"))            # 依赖不存在
+        replans = [bad, bad,                                          # 第一次：自修复也没改对
                    plan(task("t5", "echo", text="D"))]               # 第二次：合法
         first = plan(task("t1", "echo", text="A"),
                      task("t2", "join", left="只给了一个参数"),
@@ -918,3 +936,76 @@ class TestFinalizerStructuredOutput:
         out = run(registry, "随便说说", llm_for("我不知道该怎么办"))
         assert out["failure"] == ErrorCode.AG_PLAN_PARSE_FAILED.value
         assert out["turn_summary"]
+
+
+# ============================================================
+# 评测暴露的问题：收尾兜底、做不成的部分、关掉校验时的失败
+# ============================================================
+
+
+class TestFinalizerNeverRaises:
+    def test_unreachable_model_falls_back_to_summary(self, registry):
+        """收尾时模型不可达：工具已经执行过，回答不能缺席。"""
+        from miagent.protocol import AgentError
+
+        def responder(msgs):
+            role = msgs[0].content
+            if "规划器" in role:
+                return plan(task("t1", "echo", text="A"))
+            if "校验器" in role:
+                return _review_or_final(msgs)
+            raise AgentError(ErrorCode.AG_LLM_UNAVAILABLE, "502")
+
+        out = run(registry, "复述", FakeLLM(responder=responder))
+        assert out["final_answer"].startswith("已完成 1 项")
+        assert "模型不可达" in out["trace"][-1]
+
+
+class TestUnfulfillable:
+    """规划认定没有工具能做的部分：不执行也要报告未达成。"""
+
+    def _llm(self, tasks, unfulfillable, done=None):
+        first = json.dumps({"tasks": tasks, "unfulfillable": unfulfillable}, ensure_ascii=False)
+        return llm_for(first, done=done)
+
+    def test_nothing_doable_is_not_reported_as_completed(self, registry):
+        out = run(registry, "订一张机票", self._llm([], ["订机票"]))
+        assert out["execution_count"] == 0
+        assert out["failure"] == ErrorCode.AG_GOAL_NOT_ACHIEVED.value
+
+    def test_chitchat_stays_completed(self, registry):
+        out = run(registry, "你好", self._llm([], []))
+        assert out["failure"] is None
+
+    def test_doable_part_runs_and_turn_is_unmet(self, registry):
+        prompts = []
+
+        def goal_check(msgs):
+            prompts.append(msgs[1].content)
+            return goal()
+
+        llm = llm_for(json.dumps({"tasks": [task("t1", "echo", text="A")],
+                                  "unfulfillable": ["订机票"]}, ensure_ascii=False))
+        responder = llm._responder
+        llm._responder = lambda m: goal_check(m) if "完成校验器" in m[0].content else responder(m)
+        out = run(registry, "复述并订机票", llm)
+        assert out["execution_summary"]["completed"] == ["t1"]
+        assert out["failure"] == ErrorCode.AG_GOAL_NOT_ACHIEVED.value
+        assert "订机票" in prompts[0] and "无法完成" in prompts[0]
+
+    def test_dispatch_reports_not_completed(self, registry):
+        from miagent.runtime import dispatch_result
+        out = run(registry, "订一张机票", self._llm([], ["订机票"]))
+        assert dispatch_result(out).completed is False
+
+
+class TestWithoutVerification:
+    def test_replan_does_not_clear_failure(self, registry):
+        """关掉校验后，重规划只接手了无关任务：失败不能被当成已恢复。"""
+        llm = llm_for(plan(task("t1", "join", left="只给了一个参数"),
+                           task("t2", "echo", text="A")),
+                      replan=plan(task("t3", "echo", text="B")))
+        out = build_agent(llm, registry, retry_delay_ms=0, verify=False).invoke(
+            initial_state("汇总"), {"recursion_limit": 80})
+        assert out["failure"] is not None
+        assert "r1_t3" in out["execution_summary"]["completed"]

@@ -176,6 +176,9 @@ class AgentState(TypedDict, total=False):
     # 完成校验指出的缺口：非空表示执行跑完了但目标没达成，内容是还差什么。
     # 由重规划消费，规划完即清除。
     gap: str | None
+    # 规划认定没有任何可用工具能完成的部分（能力不支持、所需工具因权限不可见）。
+    # 这一轮的事实，不因重规划清除：非空时收尾以「目标未达成」结束。
+    unfulfilled: list[str]
 
     # 非空表示任务未完成，值为错误码。
     # 清除规则只有一条：成功的重规划清除它（新计划按构造覆盖了全部失败记录），
@@ -226,5 +229,6 @@ def initial_state(user_request: str) -> AgentState:
         final_answer="",
         turn_summary="",
         gap=None,
+        unfulfilled=[],
         failure=None,
     )

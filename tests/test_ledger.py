@@ -144,6 +144,13 @@ class TestAcceptDecidesFailure:
         s = ledger.settle({"t1": failed("t1", ErrorCode.MC_PERMISSION_DENIED.value, name="A")}, [], 0)
         assert ledger.accept(s, merged_with(s, pending("r1_t2", name="B"))).failure is None
 
+    def test_without_goal_check_new_tasks_do_not_clear_failure(self):
+        """clear=False：之后没有完成校验确认恢复真的覆盖了失败，failure 留着。"""
+        s = ledger.settle({"t1": failed("t1", ErrorCode.MC_PERMISSION_DENIED.value, name="A")}, [], 0)
+        a = ledger.accept(s, merged_with(s, pending("r1_t2", name="B")), clear=False)
+        assert a.failure == ErrorCode.MC_PERMISSION_DENIED.value
+        assert set(a.tasks) == {"r1_t2"}                 # 新任务照常派发
+
     def test_no_new_tasks_is_reported_as_unmet(self):
         """重规划是恢复机制，跑完却一个新任务都没产出，说明恢复没发生。"""
         s = ledger.settle({"t1": done("t1"),

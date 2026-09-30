@@ -11,8 +11,7 @@
   quota      同一时刻在途的系统调用数不超过握手下发的并发上限
   answer     给出了非空的回答
 
-无需工具的轮次（闲聊、能力不支持的整句）没有执行可以校验，框架也不调用
-完成校验；这类轮次的 status 不计入，只看是否没有发出任何调用、给出了回答。
+标准答案不调用任何工具的轮次（闲聊、整句都做不成）另要求没有发出任何调用。
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ def score_turn(turn: dict[str, Any], calls: list[Call], state: dict[str, Any] | 
     r: dict[str, Any] = {}
     no_tool = not turn["gold"]["tasks"]
     failure = (state or {}).get("failure")
-    r["status"] = None if no_tool else ((failure is None) == exp["achievable"])
+    r["status"] = (failure is None) == exp["achievable"]
 
     observed = Counter(_key(c.tool, c.arguments) for c in ok_calls if CATALOG[c.tool].side_effect)
     expected = Counter(_key(e["tool"], e["arguments"]) for e in exp["effects"])

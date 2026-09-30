@@ -94,7 +94,7 @@ def settle(tasks: dict[str, Task], episodes: list[Episode],
 
 
 def accept(settlement: Settlement, merged: dict[str, Task],
-           standing: str | None = None) -> Acceptance:
+           standing: str | None = None, clear: bool = True) -> Acceptance:
     """验收模型给出的任务图。merged 是 keep 与新任务合并后、已通过结构校验的图。
 
     三步，顺序不可换：
@@ -108,6 +108,11 @@ def accept(settlement: Settlement, merged: dict[str, Task],
          找不出根因时沿用 standing —— 进入重规划时尚未清除的那个码，
          完成校验判定的未达成就属于这种情况，它没有对应的失败任务。
          产出了新任务则清除 failure —— 新计划看到了全部失败记录并覆盖了剩余工作。
+
+    「覆盖了剩余工作」是模型的一面之词：新计划可能只接手了与失败无关的任务，
+    把失败的部分丢下。这时要靠完成校验在收尾前重新判定。clear 为 False
+    表示之后没有完成校验兜底（语义校验已关闭），failure 就不因新计划而清除，
+    宁可把恢复成功的轮次报为未达成，也不把失败报为完成。
     """
     new_ids = set(merged) - set(settlement.keep)
     new_tasks = {tid: merged[tid] for tid in new_ids}
@@ -118,7 +123,7 @@ def accept(settlement: Settlement, merged: dict[str, Task],
 
     needed = dag.ancestors(merged, new_ids)
     pruned = {tid: t for tid, t in merged.items() if tid in new_ids or tid in needed}
-    failure = (_root_failure(settlement.episodes) or standing) if not new_ids else None
+    failure = (_root_failure(settlement.episodes) or standing) if not new_ids or not clear else None
     return Acceptance(tasks=pruned, failure=failure, added=len(new_ids),
                       kept=len(needed), repeated=[])
 

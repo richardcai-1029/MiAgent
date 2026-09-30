@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from typing import Any, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
 
-from . import dataflow
+from . import dag, dataflow
 
 _ARGUMENTS_DESCRIPTION = ('工具参数。要用到上游任务的结果时，把该参数的值写成 '
                           '{"$from": "上游任务 id"}，该引用会自动产生依赖关系')
@@ -52,12 +52,51 @@ class TaskSpec(BaseModel):
     _no_stringified_references = field_validator("arguments")(_reject_stringified_references)
 
 
+_UNFULFILLABLE_DESCRIPTION = ("用户目标中没有任何可用工具能完成的部分，每项一句话；"
+                              "不要用无关的工具去顶替这些部分。全部都能做或无需工具时为空数组")
+
+
+def _check_structure(tasks: list[Any], known: Sequence[str] = ()) -> None:
+    """任务图的结构校验：id 不重复、依赖与引用只指向本计划的任务或 known、
+    不依赖自身、没有环。
+
+    放在 schema 校验里，与引用写成字符串同理：这一层的失败会触发自修复，
+    模型有一次改正的机会；结构错误若留到执行前才发现，整份计划只能作废。
+    known 是重规划时可以依赖的已完成任务。
+    """
+    ids = [t.id for t in tasks]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        raise ValueError(f"任务 id 重复：{'、'.join(dup)}")
+    allowed = set(ids) | set(known)
+    graph: dict[str, dict[str, list[str]]] = {}
+    for t in tasks:
+        deps = set(t.dependencies) | dataflow.referenced_ids(t.arguments)
+        if t.id in deps:
+            raise ValueError(f"任务 {t.id} 依赖了自身")
+        missing = sorted(deps - allowed)
+        if missing:
+            hint = "、".join(sorted(allowed)) or "无"
+            raise ValueError(f"任务 {t.id} 依赖或引用了不存在的任务 {'、'.join(missing)}，"
+                             f"只能依赖这些任务：{hint}")
+        graph[t.id] = {"dependencies": sorted(deps & set(ids))}
+    cycle = dag.find_cycle(graph)  # type: ignore[arg-type]
+    if cycle:
+        raise ValueError(f"任务之间的依赖成环：{'、'.join(cycle)}")
+
+
 class TaskPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tasks: list[TaskSpec] = Field(
         description="任务列表；任务间通过 dependencies 表达先后关系，"
                     "无依赖关系的任务可并行执行。无需工具时为空数组")
+    unfulfillable: list[str] = Field(default_factory=list, description=_UNFULFILLABLE_DESCRIPTION)
+
+    @model_validator(mode="after")
+    def _structure(self) -> TaskPlan:
+        _check_structure(self.tasks)
+        return self
 
 
 class FinalOutput(BaseModel):
@@ -71,17 +110,19 @@ class FinalOutput(BaseModel):
                                      "供下一轮规划参考，一两句话")
 
 
-def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
+def task_plan_model_for(tool_names: Sequence[str], known: Sequence[str] = ()) -> type[BaseModel]:
     """按当前可用工具生成收紧的模型：工具名成为 schema 里的枚举。
 
     收益有二：模型看到的 schema 直接列出合法工具名，减少幻觉；
     万一仍然幻觉，在解析阶段即被拒（AG-1001），不必白跑一步。
     将来接约束解码时，这份 schema 可直接转成采样语法。
+
+    known 是重规划时新任务可以依赖的已完成任务 id，结构校验据此放行。
     """
-    if not tool_names:
+    if not tool_names and not known:
         return TaskPlan
 
-    tool_field = Literal[tuple(tool_names)]  # type: ignore[valid-type]
+    tool_field = Literal[tuple(tool_names)] if tool_names else str  # type: ignore[valid-type]
     spec = create_model(
         "TaskSpecConstrained",
         __config__=ConfigDict(extra="forbid"),
@@ -94,10 +135,18 @@ def task_plan_model_for(tool_names: Sequence[str]) -> type[BaseModel]:
         __validators__={"_no_stringified_references":
                         field_validator("arguments")(_reject_stringified_references)},
     )
+    known_ids = tuple(known)
+
+    def structure(plan: Any) -> Any:
+        _check_structure(plan.tasks, known_ids)
+        return plan
+
     return create_model(
         "TaskPlanConstrained",
         __config__=ConfigDict(extra="forbid"),
         tasks=(list[spec], Field(description="任务列表；无依赖的任务可并行")),
+        unfulfillable=(list[str], Field(default_factory=list, description=_UNFULFILLABLE_DESCRIPTION)),
+        __validators__={"_structure": model_validator(mode="after")(structure)},
     )
 
 
