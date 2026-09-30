@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from miagent.graph import build_agent
+from miagent import build_agent
 from miagent.llm import FakeLLM
 from miagent.protocol import ConversationEndParams, ResourceBudget, TaskDispatchParams
 from miagent.runtime import (INFERENCE_SLOTS, MAX_IDLE_SESSIONS, MAX_INFLIGHT, Runtime,

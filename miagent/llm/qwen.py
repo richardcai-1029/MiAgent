@@ -46,6 +46,8 @@ def _read_dotenv(path: Path, key: str) -> str | None:
 
 
 class QwenLLM(OpenAICompatibleLLM):
+    """通义千问（DashScope）的预设：流式调用、只取文本模态、API Key 依次从参数、环境变量、.env 读取。"""
+
     def __init__(
         self,
         model: str = DEFAULT_MODEL,

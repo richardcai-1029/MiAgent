@@ -1,4 +1,4 @@
-"""OpenAI 兼容接口的模型实现（Qwen / MiMo 云端 / DeepSeek 等）。
+"""OpenAI 兼容接口的模型实现（通义千问、Ollama 等提供该接口的服务）。
 
 这一层只负责「把对话发出去、把文本收回来」，两处接入形态上的差异
 通过构造参数吸收，上层图代码对此无感：
@@ -29,6 +29,8 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class OpenAICompatibleLLM(LLM):
+    """OpenAI 兼容端点的通用实现，接入差异由 stream、extra_body、原生结构化三个开关吸收。"""
+
     # 类级默认：服务端用 JSON Schema 模式保证输出格式，无需自修复重试。
     # 具体服务不支持时，通过构造参数 native_structured_output=False 在实例上关掉。
     supports_native_structured_output = True

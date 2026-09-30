@@ -1,4 +1,4 @@
-"""任务图的依赖解析。
+"""任务调度算法：任务图的依赖解析与就绪排序。
 
 ★ 本模块是纯函数：不依赖 LangGraph、不依赖大模型、没有副作用。
 
@@ -82,22 +82,27 @@ def find_cycle(tasks: Tasks) -> list[str] | None:
 
 
 def by_status(tasks: Tasks, *status: TaskStatus) -> list[str]:
+    """状态属于 status 之一的任务 id。"""
     return [tid for tid, t in tasks.items() if t["status"] in status]
 
 
 def completed_tasks(tasks: Tasks) -> list[str]:
+    """已成功完成的任务 id。"""
     return by_status(tasks, TaskStatus.DONE)
 
 
 def running_tasks(tasks: Tasks) -> list[str]:
+    """已派发、尚未落库的任务 id。"""
     return by_status(tasks, TaskStatus.RUNNING)
 
 
 def failed_tasks(tasks: Tasks) -> list[str]:
+    """已失败（含级联失败）的任务 id。"""
     return by_status(tasks, TaskStatus.FAILED)
 
 
 def pending_tasks(tasks: Tasks) -> list[str]:
+    """尚未派发的任务 id。"""
     return by_status(tasks, TaskStatus.PENDING, TaskStatus.READY)
 
 
@@ -225,7 +230,8 @@ def is_deadlocked(tasks: Tasks) -> bool:
 def parallel_layers(tasks: Tasks) -> list[list[str]]:
     """把任务图按依赖分层：同一层内的任务彼此无依赖，可并行。
 
-    用于展示图的并行度，也是将来 Send 并行派发的依据。
+    用于展示图的并行度（规划 trace 与执行概况）。实际派发不按层，
+    而是每轮取 ready() 的全部就绪任务，上游一完成下游即可派发。
     """
     remaining = {tid: set(t["dependencies"]) for tid, t in tasks.items()}
     layers: list[list[str]] = []

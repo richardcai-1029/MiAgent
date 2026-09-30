@@ -74,20 +74,20 @@ class TestStructuredOutput:
     """结构化输出：schema 由 Pydantic 模型导出，与校验同源。"""
 
     def test_valid_output_parses(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = FakeLLM(script=['{"tasks":[{"id":"a","description":"d","required_tool":"echo"}]}'])
         assert llm.complete_structured([user("t")], Plan).tasks[0].required_tool == "echo"
 
     def test_schema_is_injected_into_prompt(self):
         """模型看到的格式说明来自 model_json_schema()，不是手写的一段话。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = FakeLLM(script=['{"tasks":[]}'])
         llm.complete_structured([user("t")], Plan)
         assert "JSON Schema" in llm.seen[-1][-1].content
 
     def test_self_repair_recovers_from_bad_output(self):
         """第一次不合规 -> 把错误喂回去 -> 第二次改对。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         outs = iter(["我建议先查电量。", '{"tasks":[{"id":"a","description":"d","required_tool":"echo"}]}'])
         llm = FakeLLM(responder=lambda m: next(outs))
         assert llm.complete_structured([user("t")], Plan).tasks[0].required_tool == "echo"
@@ -95,14 +95,14 @@ class TestStructuredOutput:
 
     def test_repair_prompt_carries_the_actual_error(self):
         """自修复的关键是告诉模型「错在哪」，而不是原样重试。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         outs = iter(['{"plan":[]}', '{"tasks":[]}'])
         llm = FakeLLM(responder=lambda m: next(outs))
         llm.complete_structured([user("t")], Plan)
         assert "tasks" in llm.seen[-1][-1].content     # 修复提示里指出了缺失字段
 
     def test_gives_up_after_max_repairs(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = FakeLLM(responder=lambda m: "永远不合规")
         with pytest.raises(AgentError) as ei:
             llm.complete_structured([user("t")], Plan, max_repairs=2)
@@ -112,7 +112,7 @@ class TestStructuredOutput:
     def test_repair_within_reserve_never_overflows(self):
         """调用方按 structured_reserve 预留后，上一次输出再长，自修复也不超窗：
         放不下原输出时只回传错误说明。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         from miagent.llm.base import _schema_message
 
         llm = FakeLLM(context_limit=4000)
@@ -128,7 +128,7 @@ class TestStructuredOutput:
 
     def test_repair_refits_prompt_to_keep_the_echo(self):
         """原输出放不下时，调用方重拼一份更短的提示词腾位置，原输出照样回传。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
 
         llm = FakeLLM(context_limit=4000)
         room = llm.context_limit - llm.structured_reserve(Plan)
@@ -148,7 +148,7 @@ class TestStructuredOutput:
         assert sum(len(m.content) for m in last) <= llm.context_limit
 
     def test_repair_echoes_output_when_it_fits(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         outs = iter(['{"plan":[]}', '{"tasks":[]}'])
         llm = FakeLLM(responder=lambda m: next(outs))
         llm.complete_structured([user("t")], Plan)
@@ -156,7 +156,7 @@ class TestStructuredOutput:
 
     def test_tool_name_enum_rejects_hallucination(self):
         """工具名收进 enum 后，幻觉在校验阶段即被拒。"""
-        from miagent.graph.schema import task_plan_model_for as plan_model_for
+        from miagent.core.schema import task_plan_model_for as plan_model_for
         M = plan_model_for(["echo", "system.get_battery"])
         llm = FakeLLM(responder=lambda m: '{"tasks":[{"id":"a","description":"d","required_tool":"system.open_wechat"}]}')
         with pytest.raises(AgentError):
@@ -270,7 +270,7 @@ class TestOpenAICompatible:
         assert llm._client.calls[0]["extra_body"] == {"modalities": ["text"]}
 
     def test_native_structured_uses_response_format(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = self._llm()
         llm._client = self._Client(text='{"tasks":[]}')
         llm.complete_structured([user("t")], Plan)
@@ -278,7 +278,7 @@ class TestOpenAICompatible:
 
     def test_non_native_structured_falls_back_to_prompt_schema(self):
         """关掉原生模式后：不带 response_format，schema 由基类注入 prompt。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = self._llm(native_structured_output=False)
         llm._client = self._Client(text='{"tasks":[]}')
         llm.complete_structured([user("t")], Plan)
@@ -372,7 +372,7 @@ class TestOllama:
 
     def test_structured_keeps_native_mode_and_switch(self):
         """结构化调用仍走 response_format，软开关排在基类注入的 schema 之后。"""
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = self._llm()
         llm.complete_structured([user("t")], Plan)
         call = llm._client.calls[0]
@@ -391,19 +391,19 @@ class TestStructuredGoesThroughGuard:
         return llm
 
     def test_native_structured_is_counted(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = self._native()
         llm.complete_structured([user("t")], Plan)
         assert llm.stats()["calls"] == 1
 
     def test_non_native_structured_is_counted_once(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = self._native(native_structured_output=False)
         llm.complete_structured([user("t")], Plan)
         assert llm.stats()["calls"] == 1
 
     def test_native_structured_respects_context_limit(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = self._native(context_limit=10)
         with pytest.raises(AgentError) as ei:
             llm.complete_structured([user("x" * 11)], Plan)
@@ -411,7 +411,7 @@ class TestStructuredGoesThroughGuard:
         assert llm._client.calls == []            # 没发出去
 
     def test_repair_round_is_a_second_call(self):
-        from miagent.graph.schema import TaskPlan as Plan
+        from miagent.core.schema import TaskPlan as Plan
         llm = FakeLLM(["not json", '{"tasks":[]}'])
         llm.complete_structured([user("t")], Plan)
         assert llm.stats() == {**llm.stats(), "calls": 2, "repairs": 1}

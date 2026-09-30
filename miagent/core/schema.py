@@ -102,6 +102,8 @@ def _check_structure(tasks: list[Any], known: Sequence[str] = ()) -> None:
 
 
 class TaskPlan(BaseModel):
+    """规划与重规划的结构化输出：任务列表、做不成的操作、是否直接回答。"""
+
     model_config = ConfigDict(extra="forbid", json_schema_extra=_require_direct_answer)
 
     tasks: list[TaskSpec] = Field(
@@ -172,7 +174,7 @@ class ResultReview(BaseModel):
     """对一次工具调用结果的校验判定。
 
     corrected_arguments 是「自动修正」的落点，但它只是**提议**：
-    能不能派发由 `graph.verify.accept_correction` 确定性地决定。
+    能不能派发由 `core.verify.accept_correction` 确定性地决定。
     """
 
     model_config = ConfigDict(extra="forbid")

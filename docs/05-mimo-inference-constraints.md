@@ -34,7 +34,7 @@ schema 校验与自修复重试。这两项对云端模型同样适用，属于�
 判据只有一句：**任何有确定答案的问题都不得交给模型**。
 
 依赖是否满足、哪些任务可并行、是否超出重试上限、是否全部完成、是否死锁、
-参数合不合 schema、失败该重试还是换方案，全部由 `dag.py`、`tools/validation.py`
+参数合不合 schema、失败该重试还是换方案，全部由 `core/dag.py`、`tools/validation.py`
 与 `evaluator` 的纯函数判定。
 
 判据的另一面同样成立：**没有确定答案的问题，纯函数给不出来**。「工具返回的这个结果
@@ -156,17 +156,17 @@ schema 校验与自修复重试。这两项对云端模型同样适用，属于�
 
 | 约束 | 落点 | 状态 |
 |---|---|---|
-| 判断不交给模型 | `graph/dag.py`、`nodes.evaluator` | 第 1 周已实现，本周补守卫测试 |
+| 判断不交给模型 | `core/dag.py`、`evaluator.evaluator` | 第 1 周已实现，本周补守卫测试 |
 | 模型调用范围受限 | `test_graph.py` AST 守卫 | 本周落地 |
 | 上下文预算与裁剪 | `llm/context.py` | 已落地 |
 | token 计量 | `llm/base.py::LLM.estimate` | 已落地，默认按字符近似 |
 | 脏输出清洗 | `llm/base.py::first_json_object` | 已落地 |
 | 归一化解析 | `tools/validation.py` | 已落地 |
 | 错误反馈过滤 | `tools/base.py::Tool.invoke` | 已落地 |
-| 计划规模与完成校验 | `nodes._plan`、`nodes.replanner` | 已落地 |
-| 结果语义校验与参数修正 | `graph/verify.py`、`nodes.verify_results` | 已落地 |
-| 完成状态校验 | `nodes.verify_goal`、`ledger.survey` | 已落地 |
-| schema 收紧 | `graph/schema.py::task_plan_model_for`、`FinalOutput` | 第 1 周已实现；收尾输出第 3 周纳入 |
+| 计划规模与完成校验 | `planning._plan`、`planning.replanner` | 已落地 |
+| 结果语义校验与参数修正 | `core/verify.py`、`verifiers.result_verifier` | 已落地 |
+| 完成状态校验 | `verifiers.goal_verifier`、`ledger.survey` | 已落地 |
+| schema 收紧 | `core/schema.py::task_plan_model_for`、`FinalOutput` | 第 1 周已实现；收尾输出第 3 周纳入 |
 | 自修复重试 | `llm/base.py::complete_structured` | 第 1 周已实现 |
 | 约束解码 | 同一份 schema 转采样语法 | 待 MiMo 推理栈 |
 | 确定性采样参数 | `LLM` 接口的采样配置 | 待 MiMo 接口 |

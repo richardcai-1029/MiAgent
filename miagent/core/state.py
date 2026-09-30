@@ -1,4 +1,4 @@
-"""Agent 图的共享状态：任务 DAG 模型。
+"""Agent 的共享状态：任务 DAG 模型。
 
 任务之间以 dependencies 显式表达先后关系，Scheduler 靠依赖解析决定
 现在能执行哪些：
@@ -21,11 +21,6 @@ import operator
 from enum import StrEnum
 from typing import Annotated, Any, Literal, TypedDict
 
-# ---- 循环出口的兜底上限 ----
-MAX_ATTEMPTS_PER_TASK = 2   # 单个任务最多重试几次
-MAX_REPLANS = 2             # 最多重规划几次，超出 -> AG-1003
-MAX_TOTAL_EXECUTIONS = 20   # 单次会话累计最多执行几次工具，超出 -> AG-1002
-
 Verdict = Literal["success", "retry", "replan", "abort"]
 Route = Literal["local", "miclaw"]
 
@@ -46,6 +41,8 @@ class TaskStatus(StrEnum):
 
 
 class Task(TypedDict):
+    """任务图里的一个任务：要调用的工具、参数、前置任务，以及框架维护的执行状态。"""
+
     id: str
     description: str            # 这一步要达成什么，给人和 Replanner 看
     dependencies: list[str]     # 必须先完成的任务 id
@@ -94,7 +91,7 @@ class Review(TypedDict):
 
     判定本身只回答「这次执行算不算达成了任务的目标」；该重试还是该重规划
     仍由 Evaluator 按既有规则推出。correction 非空表示模型给出的新参数已经
-    通过确定性把关（见 graph.verify），可以直接拿去重试同一个任务。
+    通过确定性把关（见 core.verify），可以直接拿去重试同一个任务。
     """
 
     task_id: str
@@ -136,6 +133,8 @@ class Turn(TypedDict):
 
 
 class AgentState(TypedDict, total=False):
+    """一次请求在各节点间流转的共享状态。带 reducer 的字段由编排框架按 reducer 合并。"""
+
     # ---------- 输入 ----------
     user_request: str
     # 对话历史：之前各轮的记录，由 Session 在 run 时填入，见 miagent.memory.session。
@@ -155,7 +154,7 @@ class AgentState(TypedDict, total=False):
     # 本轮结果的语义校验判定，与 outcomes 一同被 Evaluator 消费后清空。
     reviews: Annotated[list[Review], append_or_reset]
 
-    # ---------- 历史（只增不改，用 reducer）----------
+    # ---------- 历史（只增不改，用 reducer） ----------
     errors: Annotated[list[dict[str, Any]], operator.add]
     trace: Annotated[list[str], operator.add]
     # 情景记忆：离开任务图的终态任务压缩后的记录，见 miagent.memory。
@@ -195,6 +194,7 @@ def new_task(
     dependencies: list[str] | None = None,
     seq: int = 0,
 ) -> Task:
+    """构造一个 pending 状态的任务。"""
     return Task(
         id=task_id,
         description=description,

@@ -32,9 +32,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from miagent.graph import build_agent, initial_state, nodes
-from miagent.graph.nodes_meta import Deps
-from miagent.graph.state import Turn
+from miagent import build_agent, initial_state
+from miagent.agent import Deps, planner
+from miagent.core.state import Turn
 from miagent.memory import Session
 
 from ..suite.check import load
@@ -114,7 +114,7 @@ def run_plan(cases: list[dict[str, Any]], out: Path) -> None:
                 t0 = time.perf_counter()
                 error = None
                 try:
-                    res = nodes.planner(state, deps)
+                    res = planner(state, deps)
                 except Exception as e:
                     res, error = {"tasks": {}, "failure": "exception"}, f"{type(e).__name__}: {e}"[:300]
                 wall = (time.perf_counter() - t0) * 1000

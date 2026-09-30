@@ -21,7 +21,7 @@
 """
 
 from . import anchor, episodic, ledger, session
-from ..graph.state import Anchor, Episode, Turn
+from ..core.state import Anchor, Episode, Turn
 from .session import Session
 
 __all__ = ["Anchor", "Episode", "Session", "Turn",

@@ -29,7 +29,7 @@ from typing import Any, Iterator
 
 import psutil
 
-from miagent.graph import build_agent
+from miagent import build_agent
 from miagent.memory import Session
 
 from .env import make_env

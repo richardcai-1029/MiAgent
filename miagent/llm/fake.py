@@ -2,7 +2,7 @@
 
 它承担两个职责：
   · 测试时提供确定性输出 —— 否则断言无从写起
-  · MiMo 接口开放前，让整张图能完整跑通并验证每条分支
+  · 不依赖任何推理服务，让整张图能完整跑通并验证每条分支
 
 两种用法：
     FakeLLM(script=["第一次的回答", "第二次的回答"])   按序返回
@@ -21,6 +21,8 @@ Responder = Callable[[list[LLMMessage]], str]
 
 
 class FakeLLM(LLM):
+    """不联网、确定性的模型实现：按脚本依次返回，或由 responder 按对话内容作答。"""
+
     name = "fake"
 
     def __init__(

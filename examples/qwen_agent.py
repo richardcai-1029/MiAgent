@@ -10,7 +10,7 @@
 import sys
 
 from miagent.client import MiClawClient
-from miagent.graph import build_agent
+from miagent import build_agent
 from miagent.llm.qwen import QwenLLM
 from miagent.memory import Session
 from miagent.mock_server import MiClawMockServer

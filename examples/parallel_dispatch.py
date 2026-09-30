@@ -7,7 +7,7 @@ import json
 import time
 
 from miagent.client import MiClawClient
-from miagent.graph import build_agent, initial_state
+from miagent import build_agent, initial_state
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
 from miagent.tools import ToolRegistry, tool

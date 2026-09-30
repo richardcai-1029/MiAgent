@@ -14,7 +14,7 @@ FakeLLM 在这里同时扮演规划器与校验器：校验器的回复是写死
 import json
 
 from miagent.client import MiClawClient
-from miagent.graph import build_agent, initial_state
+from miagent import build_agent, initial_state
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
 from miagent.tools import ToolRegistry

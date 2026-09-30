@@ -24,9 +24,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from miagent.graph import dag
-from miagent.graph.schema import task_plan_model_for
-from miagent.graph.state import new_task
+from miagent.core import dag
+from miagent.core.schema import task_plan_model_for
+from miagent.core.state import new_task
 from miagent.tools.validation import normalize
 
 from . import execute

@@ -34,6 +34,8 @@ from .tools import TOOL_REGISTRY, SystemTool
 
 
 class SessionState(StrEnum):
+    """会话的握手状态机。"""
+
     CONNECTED = "connected"      # 连接刚建立，还没握手
     HANDSHAKED = "handshaked"    # initialize 完成，协议版本已对齐
     REGISTERED = "registered"    # agent.register 完成，可以干活了
@@ -59,6 +61,8 @@ _REQUIRED_STATE: dict[Method, set[SessionState]] = {
 
 
 class MiClawMockServer:
+    """按通信规约实现的 MiClaw 服务端：握手状态机、权限、资源配额与系统工具执行。"""
+
     def __init__(
         self,
         budget: ResourceBudget | None = None,

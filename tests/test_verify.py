@@ -11,10 +11,10 @@ import json
 import pytest
 
 from miagent.client import MiClawClient
-from miagent.graph import build_agent, initial_state, verify
-from miagent.graph.nodes import Deps, evaluator, verify_goal, verify_results
-from miagent.graph.state import (MAX_REPLANS, Review, TaskOutcome, TaskStatus,
-                                 new_task)
+from miagent import build_agent, initial_state
+from miagent.core import verify
+from miagent.agent import Deps, Limits, evaluator, goal_verifier, result_verifier
+from miagent.core.state import Review, TaskOutcome, TaskStatus, new_task
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
 from miagent.protocol import ErrorCode
@@ -241,33 +241,33 @@ class TestResultVerifier:
         llm = FakeLLM(script=[])
         task = new_task("t1", "回显 A", "echo", {"text": "A"})
         s = state_with(task, outcome(ok=False, code=ErrorCode.MC_REQUEST_TIMEOUT.value))
-        out = verify_results(s, self._deps(registry, llm))
+        out = result_verifier(s, self._deps(registry, llm))
         assert llm.call_count == 0 and "reviews" not in out
         assert "跳过结果校验" in out["trace"][0]
 
     def test_disabled_verification_calls_nothing(self, registry):
         llm = FakeLLM(script=[])
         task = new_task("t1", "回显 A", "echo", {"text": "A"})
-        out = verify_results(state_with(task, outcome()), self._deps(registry, llm, verify=False))
+        out = result_verifier(state_with(task, outcome()), self._deps(registry, llm, verify=False))
         assert llm.call_count == 0 and "已关闭" in out["trace"][0]
 
     def test_passing_verdicts_produce_no_reviews(self, registry):
         llm = FakeLLM([reviews()])
         task = new_task("t1", "回显 A", "echo", {"text": "A"})
-        out = verify_results(state_with(task, outcome()), self._deps(registry, llm))
+        out = result_verifier(state_with(task, outcome()), self._deps(registry, llm))
         assert out["reviews"] == []
         assert "全部通过" in out["trace"][0]
 
     def test_rejection_is_recorded_with_its_reason(self, registry):
         llm = FakeLLM([reviews(reject("t1", "回显的是 B，要的是 A"))])
         task = new_task("t1", "回显 A", "echo", {"text": "B"})
-        out = verify_results(state_with(task, outcome(content="B")), self._deps(registry, llm))
+        out = result_verifier(state_with(task, outcome(content="B")), self._deps(registry, llm))
         assert out["reviews"] == [review("t1", False, "回显的是 B，要的是 A", None)]
 
     def test_correction_passes_through_the_gate(self, registry):
         llm = FakeLLM([reviews(reject("t1", "回显的是 B", {"text": "A"}))])
         task = new_task("t1", "回显 A", "echo", {"text": "B"})
-        out = verify_results(state_with(task, outcome(content="B")), self._deps(registry, llm))
+        out = result_verifier(state_with(task, outcome(content="B")), self._deps(registry, llm))
         assert out["reviews"][0]["correction"] == {"text": "A"}
         assert "参数已修正" in out["trace"][0]
 
@@ -275,7 +275,7 @@ class TestResultVerifier:
         """修正过不了闸就退回重规划，但「未通过」这个判定仍然成立。"""
         llm = FakeLLM([reviews(reject("t1", "回显的是 B", {"zzz": 1}))])
         task = new_task("t1", "回显 A", "echo", {"text": "B"})
-        out = verify_results(state_with(task, outcome(content="B")), self._deps(registry, llm))
+        out = result_verifier(state_with(task, outcome(content="B")), self._deps(registry, llm))
         assert out["reviews"][0]["ok"] is False
         assert out["reviews"][0]["correction"] is None
         assert "不就地修正" in out["trace"][0]
@@ -289,7 +289,7 @@ class TestResultVerifier:
         s["tasks"] = {"t1": t1, "t2": t2}
         s["dispatch"] = [{"task": t1, "route": "local"}, {"task": t2, "route": "local"}]
         s["outcomes"] = [outcome("t1", content="A"), outcome("t2", content="B")]
-        out = verify_results(s, self._deps(registry, llm))
+        out = result_verifier(s, self._deps(registry, llm))
         assert [r["task_id"] for r in out["reviews"]] == ["t2"]
 
     def _two(self, first, second):
@@ -305,7 +305,7 @@ class TestResultVerifier:
         """放不下的那项整项不交给模型、按原判定处理；其余项照常校验。
         模型从不看到被截短或去掉结果的记录。"""
         llm = FakeLLM([reviews(reject("t2", "回显的是 B"))])
-        out = verify_results(self._two("X" * 20000, "B"), self._deps(registry, llm))
+        out = result_verifier(self._two("X" * 20000, "B"), self._deps(registry, llm))
         body = llm.seen[-1][1].content
         assert "任务 t1" not in body and "X" * 100 not in body
         assert "任务 t2" in body
@@ -315,7 +315,7 @@ class TestResultVerifier:
     def test_left_out_item_cannot_be_judged(self, registry):
         """schema 只收留下的项：模型对没看到的任务下判定，解析阶段就拒掉。"""
         llm = FakeLLM(responder=lambda _m: reviews(reject("t1", "没看到也判")))
-        out = verify_results(self._two("X" * 20000, "B"), self._deps(registry, llm))
+        out = result_verifier(self._two("X" * 20000, "B"), self._deps(registry, llm))
         assert "reviews" not in out and "校验未完成" in out["trace"][0]
 
     def test_nothing_fits_means_no_model_call(self, registry):
@@ -323,7 +323,7 @@ class TestResultVerifier:
             raise AssertionError("没有可交给模型的待校验项时不应该调模型")
 
         llm = FakeLLM(responder=must_not_be_called)
-        out = verify_results(self._two("X" * 20000, "Y" * 20000), self._deps(registry, llm))
+        out = result_verifier(self._two("X" * 20000, "Y" * 20000), self._deps(registry, llm))
         assert "reviews" not in out
         assert "待校验项都放不下" in out["trace"][0]
 
@@ -331,14 +331,14 @@ class TestResultVerifier:
         """task_id 收进 enum：判定挂错任务比判错更难察觉，在解析阶段就拒掉。"""
         llm = FakeLLM(responder=lambda _m: reviews(reject("t9", "不存在的任务")))
         task = new_task("t1", "回显 A", "echo", {"text": "A"})
-        out = verify_results(state_with(task, outcome()), self._deps(registry, llm))
+        out = result_verifier(state_with(task, outcome()), self._deps(registry, llm))
         assert "reviews" not in out and "校验未完成" in out["trace"][0]
 
     def test_unavailable_verification_falls_back_to_the_original_verdict(self, registry):
         """模型给不出合法判定：按没有语义校验处理，不误伤。"""
         llm = FakeLLM(responder=lambda _m: "我觉得挺好的")
         task = new_task("t1", "回显 A", "echo", {"text": "A"})
-        out = verify_results(state_with(task, outcome()), self._deps(registry, llm))
+        out = result_verifier(state_with(task, outcome()), self._deps(registry, llm))
         assert "reviews" not in out
         assert "校验未完成" in out["trace"][0]
 
@@ -346,7 +346,7 @@ class TestResultVerifier:
         """校验提示词只带本轮用到的工具，其余 schema 进去也只是占窗口。"""
         llm = FakeLLM([reviews()])
         task = new_task("t1", "回显 A", "echo", {"text": "A"})
-        verify_results(state_with(task, outcome()), self._deps(registry, llm))
+        result_verifier(state_with(task, outcome()), self._deps(registry, llm))
         body = llm.seen[-1][1].content
         assert "echo" in body and "system.query_calendar" not in body
 
@@ -357,7 +357,7 @@ class TestResultVerifier:
         s = state_with(task, outcome(content="电量 63%"))
         s["dispatch"] = [{"task": {**task, "arguments": {"text": "电量 63%"}},
                           "route": "local"}]
-        verify_results(s, self._deps(registry, llm))
+        result_verifier(s, self._deps(registry, llm))
         assert '"text": "电量 63%"' in llm.seen[-1][1].content
 
 
@@ -427,49 +427,49 @@ class TestGoalVerifier:
 
     def test_achieved_changes_nothing(self, registry):
         llm = FakeLLM([goal(True)])
-        out = verify_goal(self._state(registry), Deps(llm=llm, registry=registry))
+        out = goal_verifier(self._state(registry), Deps(llm=llm, registry=registry))
         assert "failure" not in out and "verdict" not in out
 
     def test_unachieved_turns_to_replanning(self, registry):
         llm = FakeLLM([goal(False, "还没订餐厅")])
-        out = verify_goal(self._state(registry), Deps(llm=llm, registry=registry))
+        out = goal_verifier(self._state(registry), Deps(llm=llm, registry=registry))
         assert out["failure"] == ErrorCode.AG_GOAL_NOT_ACHIEVED.value
         assert out["verdict"] == "replan" and out["gap"] == "还没订餐厅"
 
     def test_unachieved_without_replan_budget_goes_to_finalizer(self, registry):
         llm = FakeLLM([goal(False, "还没订餐厅")])
-        out = verify_goal(self._state(registry, replan_count=MAX_REPLANS),
+        out = goal_verifier(self._state(registry, replan_count=Limits().max_replans),
                           Deps(llm=llm, registry=registry))
         assert out["failure"] == ErrorCode.AG_GOAL_NOT_ACHIEVED.value
         assert "verdict" not in out
 
     def test_nothing_executed_means_nothing_to_verify(self, registry):
         llm = FakeLLM(script=[])
-        out = verify_goal(self._state(registry, execution_count=0, tasks={}),
+        out = goal_verifier(self._state(registry, execution_count=0, tasks={}),
                           Deps(llm=llm, registry=registry))
         assert out == {} and llm.call_count == 0
 
     def test_an_existing_failure_code_skips_the_call(self, registry):
         """已经带着错误码就不会声称成功，再判一次没有新信息。"""
         llm = FakeLLM(script=[])
-        out = verify_goal(self._state(registry, failure=ErrorCode.AG_INVALID_PLAN.value),
+        out = goal_verifier(self._state(registry, failure=ErrorCode.AG_INVALID_PLAN.value),
                           Deps(llm=llm, registry=registry))
         assert out == {} and llm.call_count == 0
 
     def test_disabled_verification_calls_nothing(self, registry):
         llm = FakeLLM(script=[])
-        out = verify_goal(self._state(registry), Deps(llm=llm, registry=registry, verify=False))
+        out = goal_verifier(self._state(registry), Deps(llm=llm, registry=registry, verify=False))
         assert out == {} and llm.call_count == 0
 
     def test_the_prompt_carries_the_anchor_and_the_record(self, registry):
         llm = FakeLLM([goal(True)])
-        verify_goal(self._state(registry), Deps(llm=llm, registry=registry))
+        goal_verifier(self._state(registry), Deps(llm=llm, registry=registry))
         body = llm.seen[-1][1].content
         assert "用户目标：订餐" in body and "今晚 19:00-22:00 空闲" in body
 
     def test_unavailable_verification_finalizes_as_completed(self, registry):
         llm = FakeLLM(responder=lambda _m: "差不多吧")
-        out = verify_goal(self._state(registry), Deps(llm=llm, registry=registry))
+        out = goal_verifier(self._state(registry), Deps(llm=llm, registry=registry))
         assert "failure" not in out and "完成校验未完成" in out["trace"][0]
 
 

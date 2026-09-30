@@ -6,8 +6,8 @@
 
 import pytest
 
-from miagent.graph import dag
-from miagent.graph.state import TaskStatus, new_task
+from miagent.core import dag
+from miagent.core.state import TaskStatus, new_task
 from miagent.protocol import AgentError, ErrorCode
 
 

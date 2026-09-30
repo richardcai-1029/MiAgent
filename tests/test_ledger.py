@@ -5,7 +5,7 @@ failure 何时清除。全部字典进、字典出，不需要图引擎与协议
 整张图是否把账本接上了，由 test_graph.py 里少量端到端用例证明。
 """
 
-from miagent.graph.state import TaskStatus, new_task
+from miagent.core.state import TaskStatus, new_task
 from miagent.memory import ledger
 from miagent.protocol import ErrorCode
 

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from miagent.client import client as client_mod
-from miagent.graph import build_agent
+from miagent import build_agent
 from miagent.memory import Session
 from miagent.mock_server import server as server_mod
 

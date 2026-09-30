@@ -4,7 +4,7 @@
 |---|---|
 | 基础框架 | LangGraph `>=1.2,<2.0`（实测通过 1.2.10、1.2.11） |
 | 目标生态 | MiClaw 系统级 Agent 生态 · MiMo 端侧大模型 |
-| 文档版本 | v3.7 |
+| 文档版本 | v3.8 |
 
 本清单记录已完成并经测试验证的改造项。每项均给出落地位置、验证方式与**框架侵入面**，可逐条核查。
 
@@ -34,7 +34,7 @@ LangGraph 的工具调用是进程内 Python 函数调用，不存在跨进程�
 | A-6 | 无协议版本协商 | `initialize` 比对版本，不匹配返回 MC-2001 | `test_mock_server.py::test_version_mismatch` | L0 |
 | A-7 | 协议只有 Agent 调用系统的方向，系统把用户请求派给 Agent 的报文不存在；请求无优先级，多个请求同时到达时 Agent 无从区分谁更急 | 扩展 `miclaw/task.dispatch`（MiClaw → Agent）：对话标识、请求原文、请求优先级。优先级按「有没有人正在等这个回答」分为 `foreground` / `background` 两级而非数值，缺省按前台；响应只给回答与是否完成，AG-* 码不上网络。服务端受理的方法与 Agent 受理的方法分列两个枚举，反向发送返回 MC-2004。经 A-9 的收发分流接到运行时 | `protocol/messages.py::AgentMethod` / `TaskDispatchParams` / `TaskDispatchResult`、`Runtime.dispatch`；`test_protocol.py::TestTaskDispatch`、`test_runtime.py::TestDispatch` | L0 |
 | A-8 | 系统无从告知 Agent 一段对话已结束，Agent 侧为对话保留的上下文只能一直留着 | 扩展 `miclaw/conversation.end` 通知（MiClaw → Agent，无回复），参数只有 `conversationId`；结束前已派发的请求照常执行完，此后同一标识视为新对话 | `protocol/messages.py::ConversationEndParams`、`Runtime.end_conversation`；`test_runtime.py::TestSessionReclaim` | L0 |
-| A-9 | 客户端只会读自己请求的响应：请求期间整段持锁、在 receive 上等，MiClaw 主动发来的请求无人接收；并发调用因此被锁串行化，图层的并行在 MiClaw 侧拿不到提速 | 读线程独占接收，按报文种类分流：带 method 的交给登记的处理函数（未登记回 MC-2004、未注册回 MC-2002），其余按 id 交给等它的调用。发出方只在分配 id 与写一行时持锁，等响应不持锁，多个请求同时在途；超时后到的响应丢弃，连接关闭时在途请求一并以 MC-1002 失败，坏行丢弃后继续读。耗时的处理函数返回 Future，处理完再回复，不占读线程；受理失败除报文不合规约外一律回 -32603 不带 data，AG-* 不上网络。`runtime.serve` 把派发请求与结束通知接到运行时。对并发服务端实测三个 300ms 调用 930ms → 305ms | `client.py::_read_loop` / `_route` / `_on_incoming`、`transport.py::LoopbackTransport`（阻塞接收、服务端主动投递）、`mock_server.dispatch_task`、`runtime.serve`；`test_demux.py` 19 条，含真实子进程管道与「处理 MiClaw 请求期间反向调用 MiClaw 工具」 | L0 |
+| A-9 | 客户端只会读自己请求的响应：请求期间整段持锁、在 receive 上等，MiClaw 主动发来的请求无人接收；并发调用因此被锁串行化，图层的并行在 MiClaw 侧拿不到提速 | 读线程独占接收，按报文种类分流：带 method 的交给登记的处理函数（未登记回 MC-2004、未注册回 MC-2002），其余按 id 交给等它的调用。发出方只在分配 id 与写一行时持锁，等响应不持锁，多个请求同时在途；超时后到的响应丢弃，连接关闭时在途请求一并以 MC-1002 失败，坏行丢弃后继续读。耗时的处理函数返回 Future，处理完再回复，不占读线程；受理失败除报文不合规约外一律回 -32603 不带 data，AG-* 不上网络。`runtime.serve` 把派发请求与结束通知接到运行时。对并发服务端实测三个 300ms 调用 930ms → 305ms | `client.py::_read_loop` / `_route` / `_on_incoming`、`transport.py::LoopbackTransport`（阻塞接收、服务端主动投递）、`mock_server.dispatch_task`、`runtime.serve`；`test_demux.py` 18 条，含真实子进程管道与「处理 MiClaw 请求期间反向调用 MiClaw 工具」 | L0 |
 
 ### B · 错误处理体系
 
@@ -48,7 +48,7 @@ LangChain 工具失败表现为 Python 异常或自由文本，无错误分类�
 | B-4 | 无按错误类别的差异化重试策略 | 按千位段位决策：1xxx 退避重试、4xxx 延迟或降级、3xxx/5xxx 不重试 | `protocol/errors.py::retry_policy`；`test_tools.py::TestRetryPolicyByBand` | L0 |
 | B-6 | 业务失败（`isError`）与调用失败（JSON-RPC error）未在上层区分 | 上层据此选择「让模型换方案」还是「退避重试」 | `client.py::call_tool` 将 isError 映射为 MC-3003；见 `test_business_failure_differs_from_call_failure` | L0 |
 | B-8 | 工具内部异常的原始文本直接作为给模型的失败信息 —— 异常消息常带路径、连接串、内部标识，既占端侧本就紧张的窗口，又可能把模型带偏 | 给模型的 content 改为确定性措辞加分级处置建议；原始消息与异常类型移入 `detail`，只进 Agent 侧日志 | `tools/base.py::Tool.invoke`；`test_validation.py::TestErrorTextGivenToTheModel` | L0 |
-| B-7 | `RetryPolicy.BACKOFF` 声明「退避后重试」，实现却是下一轮立即重发 —— 传输抖动与资源占用这两类失败在立即重发时状况还没来得及改变 | 重试前等待；等待实现可注入，使退避行为可被测试观察而不必真的等 | `nodes.execute`；`test_graph.py::TestRetryBackoff` | L0 |
+| B-7 | `RetryPolicy.BACKOFF` 声明「退避后重试」，实现却是下一轮立即重发 —— 传输抖动与资源占用这两类失败在立即重发时状况还没来得及改变 | 重试前等待；等待实现可注入，使退避行为可被测试观察而不必真的等 | `executor.executor`；`test_graph.py::TestRetryBackoff` | L0 |
 
 ### C · 端侧资源约束
 
@@ -69,18 +69,18 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 | 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
 |---|---|---|---|---|
 | D-1 | LLM 抽象面向云端 API | 定义最小 LLM 接口，支持 Fake / MiMo 端侧 / 云端三种实现热切换 | `miagent/llm/`；模板方法统一承担上下文检查与耗时统计，Fake/云端两种实现已可切换 | L0 |
-| D-2 | 上下文超限直接拒绝（AG-3001）。端侧窗口小，工具一多、执行历史一长，正常任务也会触顶，拒绝即等于任务失败 | 提示词按优先级片段拼装，超预算时依次削减：工具描述削为只剩工具名、执行历史削为只剩计数；不做按字符截断（切开的 JSON 与历史是语法损坏的文本）；削减内容进 trace；计量口径由 `LLM.estimate` 提供，默认按字符近似，接入真实 tokenizer 后覆写 | `llm/context.py`；`test_context.py` 13 条用例 | L0 |
+| D-2 | 上下文超限直接拒绝（AG-3001）。端侧窗口小，工具一多、执行历史一长，正常任务也会触顶，拒绝即等于任务失败 | 提示词按优先级片段拼装，超预算时依次削减：工具描述削为只剩工具名、执行历史削为只剩计数；不做按字符截断（切开的 JSON 与历史是语法损坏的文本）；削减内容进 trace；计量口径由 `LLM.estimate` 提供，默认按字符近似，接入真实 tokenizer 后覆写 | `llm/context.py`；`test_context.py` 16 条用例 | L0 |
 | D-3 | 解析入口以「第一个 `{` 到最后一个 `}`」截取 JSON：输出含两个 JSON 块时会把两块连同中间的文字一并截出，得到的既不是前者也不是后者 | 改为逐字符扫描取第一个括号配对完整的对象，同时去掉结构上的尾随逗号；扫描区分字符串内外，不会动到字符串值里的逗号。引号错用与截断不修补 —— 修复方式不唯一，猜出来的计划会被真实执行，交由自修复重试 | `llm/base.py::first_json_object`；`test_llm.py::TestDirtyOutputCleaning` | L0 |
 | D-4 | 工具描述格式与模型 function calling 格式未打通 | MCP `inputSchema` 本就是 JSON Schema，可直接喂模型，无需转换 | `test_client.py::test_tool_schema_survives_the_wire` | L0 |
-| D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `graph/schema.py`、`llm/base.py::complete_structured` | L0 |
-| D-6 | 无对话上下文：图的一次 invoke 处理一个请求，第二个请求承接第一个时规划器一无所知 | `memory.Session` 持有历次轮次（请求、回答、本轮摘要、错误码、执行记录），run 时填入 `history`；Planner 渲染为每轮一段，越旧越先削减——上一轮先降为只剩结论，更早的整段丢弃，且在工具描述之前被削；进程内保留，不落盘 | `miagent/memory/session.py`、`nodes.planner`；`test_session.py` 13 条 | L0 |
-| D-9 | 收尾只产出自由文本回答：格式无约束，且没有可供下一轮引用的本轮记录，多轮之间要么重传全部历史、要么什么都不传 | 收尾改为 schema 驱动的 `FinalOutput(answer, summary)`，一次调用同时给出回答与本轮摘要；预算为 schema 预留位置；自修复失败或窗口放不下时两者一并退回确定性摘要 | `graph/schema.py::FinalOutput`、`nodes.finalizer`；`test_graph.py::TestFinalizerStructuredOutput` | L0 |
-| D-8 | 重规划无目标锚：几轮之后提示词里全是局部的成败记录，新计划可偏离原始目标且不可检测；把失败过的调用原样再拆一遍也照常执行 | 首次规划成功后写入目标锚（用户目标 + 首次拆解各步描述），每轮重规划放最前且不可裁；新任务的 (工具, 参数指纹) 全部在失败记录里时判无进展 AG-1003，不派发 | `miagent/memory/anchor.py`、`ledger.accept`（内部用 `episodic.repeats_calls`）、`nodes.planner` / `replanner`；`test_graph.py::TestGoalAnchor`、`test_ledger.py::TestAcceptDetectsSpinning` | L0 |
-| D-10 | 工具没报错就算这一步做完了：框架只认调用有没有抛异常，不认调用做的是不是要做的事。单号写成邻近的一个、查的时段与用户问的不是同一个、结果答非所问 —— 这些在错误码这一层没有任何迹象，却会被当作已完成写进执行历史，最后汇进一个声称成功的回答 | 执行与落库之间插入结果校验：把本轮结果连同任务描述与实际参数交给模型判断「这是不是这一步要的东西」，一次调用判全轮。判定只收紧不放宽（失败不会被改判为成功）；失败原因是参数写偏时，模型给出的修正参数须过工具 schema、与原参数确有不同、且不触碰 `$from` 引用，才换上新参数重试同一个任务，不重规划整张图。校验只在能给出新信息时才做：成功与工具层失败（段位 3）送校验，传输/资源/权限类失败的原因已由段位确定，不送 | `graph/verify.py`（三道闸与判定合并，纯函数）、`nodes.verify_results`、`nodes.evaluator`、`build.py` 接入节点；`test_verify.py` 48 条 | L1 |
-| D-7 | 执行上下文只增不减：终态任务全部留在任务图里，每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口 | 任务图只装还要调度的任务。终态任务在重规划时结算为 Episode 进入情景记忆，只有新任务引用到的已完成任务（连同其上游）留在图里；情景记忆渲染时按 (工具, 参数指纹) 去重、按轮次降级——本轮带结果原文，更早的只剩 id 与描述；执行概况由两者合并得出 | `miagent/memory/ledger.py`（结算的编排：settle / accept / close）、`episodic.py`、`dag.ancestors`、`nodes.replanner` / `finalizer`；`test_ledger.py` 23 条、`test_memory.py`、`test_graph.py::TestWorkingMemoryIsPruned` | L0 |
+| D-5 | 提示词无法保证模型输出符合预期结构，一次格式失误即导致任务失败 | 计划改用 Pydantic schema 驱动：schema 由模型定义导出、与校验同源；解析失败带着具体错误自修复重试；工具名收进 enum 使幻觉在解析阶段即被拒 | `core/schema.py`、`llm/base.py::complete_structured` | L0 |
+| D-6 | 无对话上下文：图的一次 invoke 处理一个请求，第二个请求承接第一个时规划器一无所知 | `memory.Session` 持有历次轮次（请求、回答、本轮摘要、错误码、执行记录），run 时填入 `history`；Planner 渲染为每轮一段，越旧越先削减——上一轮先降为只剩结论，更早的整段丢弃，且在工具描述之前被削；进程内保留，不落盘 | `miagent/memory/session.py`、`planning.planner`；`test_session.py` 20 条 | L0 |
+| D-9 | 收尾只产出自由文本回答：格式无约束，且没有可供下一轮引用的本轮记录，多轮之间要么重传全部历史、要么什么都不传 | 收尾改为 schema 驱动的 `FinalOutput(answer, summary)`，一次调用同时给出回答与本轮摘要；预算为 schema 预留位置；自修复失败或窗口放不下时两者一并退回确定性摘要 | `core/schema.py::FinalOutput`、`finalizer.finalizer`；`test_graph.py::TestFinalizerStructuredOutput` | L0 |
+| D-8 | 重规划无目标锚：几轮之后提示词里全是局部的成败记录，新计划可偏离原始目标且不可检测；把失败过的调用原样再拆一遍也照常执行 | 首次规划成功后写入目标锚（用户目标 + 首次拆解各步描述），每轮重规划放最前且不可裁；新任务的 (工具, 参数指纹) 全部在失败记录里时判无进展 AG-1003，不派发 | `miagent/memory/anchor.py`、`ledger.accept`（内部用 `episodic.repeats_calls`）、`planning.planner` / `replanner`；`test_graph.py::TestGoalAnchor`、`test_ledger.py::TestAcceptDetectsSpinning` | L0 |
+| D-10 | 工具没报错就算这一步做完了：框架只认调用有没有抛异常，不认调用做的是不是要做的事。单号写成邻近的一个、查的时段与用户问的不是同一个、结果答非所问 —— 这些在错误码这一层没有任何迹象，却会被当作已完成写进执行历史，最后汇进一个声称成功的回答 | 执行与落库之间插入结果校验：把本轮结果连同任务描述与实际参数交给模型判断「这是不是这一步要的东西」，一次调用判全轮。判定只收紧不放宽（失败不会被改判为成功）；失败原因是参数写偏时，模型给出的修正参数须过工具 schema、与原参数确有不同、且不触碰 `$from` 引用，才换上新参数重试同一个任务，不重规划整张图。校验只在能给出新信息时才做：成功与工具层失败（段位 3）送校验，传输/资源/权限类失败的原因已由段位确定，不送 | `core/verify.py`（三道闸与判定合并，纯函数）、`verifiers.result_verifier`、`evaluator.evaluator`、`topology.NODES` 接入节点；`test_verify.py` 51 条 | L1 |
+| D-7 | 执行上下文只增不减：终态任务全部留在任务图里，每一轮重规划都带着越来越长的历史，挤占端侧本就小的窗口 | 任务图只装还要调度的任务。终态任务在重规划时结算为 Episode 进入情景记忆，只有新任务引用到的已完成任务（连同其上游）留在图里；情景记忆渲染时按 (工具, 参数指纹) 去重、按轮次降级——本轮带结果原文，更早的只剩 id 与描述；执行概况由两者合并得出 | `miagent/memory/ledger.py`（结算的编排：settle / accept / close）、`episodic.py`、`dag.ancestors`、`planning.replanner` / `finalizer`；`test_ledger.py` 24 条、`test_memory.py`、`test_graph.py::TestWorkingMemoryIsPruned` | L0 |
 | D-11 | 单个会话的轮次只增不减：一段很长的对话，会话本身一直变大；而超出窗口的旧轮次早已进不了提示词，留着只占内存 | 保留的轮数由削减规则推出，不另立数字：从最新一轮往回数，连同更新的各轮的完整形式已超出模型上下文上限的那一轮及更早的轮次，削减时必然被丢弃，每轮结束后删去；最新一轮总是保留。取上下文上限而非规划器实际预算，删与不删规划器提示词逐字相同。轮次新增编号，渲染标签用它，删去前面的轮次后编号不变 | `memory/session.py::reachable`、`Session(history_limit, estimate)`、`build_runtime` 取模型的 `context_limit` 与 `estimate`；`test_session.py::TestTurnsAreBounded`，含「删与不删提示词相同」「上界恰为 fit 保留的轮数」两条逐预算穷举 | L0 |
-| D-12 | 结构化输出的预算只扣了一份无缩进的 schema，而实际注入的是带缩进的一份，也没有给自修复留位置：提示词接近窗口时，第一次输出不合 schema，自修复追加原输出与错误说明后超窗，整轮规划以 AG-3001 失败（性能检测中 1,215 轮里 39 轮，集中在长请求） | 注入的 schema 说明与自修复反馈由模型层统一生成，`structured_reserve` 按同一份文本给出预留量，规划、校验、收尾三处拼提示词时扣掉它；自修复照样回传上一次的原输出，放不下时由调用方按首次拼提示词的规则重拼（`refit`）腾出位置，仍放不下才只回传错误说明 —— 实测只回传错误说明时自修复成功率约 38%，回传原输出约 90% | `llm/base.py::structured_reserve`、`_repair_convo`；`nodes._plan` / `finalizer` 的 `refit`；`test_llm.py::test_repair_within_reserve_never_overflows`、`test_repair_refits_prompt_to_keep_the_echo` | L0 |
-| D-13 | 收尾只对「放不下」「不合 schema」兜底，模型不可达（AG-5001）原样抛出：工具已经执行，请求却以异常结束、没有回答（性能检测全链路中 11 轮） | 收尾对任何模型侧错误都退回确定性摘要，trace 注明原因 | `nodes.finalizer`；`test_graph.py::TestFinalizerNeverRaises` | L0 |
+| D-12 | 结构化输出的预算只扣了一份无缩进的 schema，而实际注入的是带缩进的一份，也没有给自修复留位置：提示词接近窗口时，第一次输出不合 schema，自修复追加原输出与错误说明后超窗，整轮规划以 AG-3001 失败（性能检测中 1,215 轮里 39 轮，集中在长请求） | 注入的 schema 说明与自修复反馈由模型层统一生成，`structured_reserve` 按同一份文本给出预留量，规划、校验、收尾三处拼提示词时扣掉它；自修复照样回传上一次的原输出，放不下时由调用方按首次拼提示词的规则重拼（`refit`）腾出位置，仍放不下才只回传错误说明 —— 实测只回传错误说明时自修复成功率约 38%，回传原输出约 90% | `llm/base.py::structured_reserve`、`_repair_convo`；`planning._plan` / `finalizer` 的 `refit`；`test_llm.py::test_repair_within_reserve_never_overflows`、`test_repair_refits_prompt_to_keep_the_echo` | L0 |
+| D-13 | 收尾只对「放不下」「不合 schema」兜底，模型不可达（AG-5001）原样抛出：工具已经执行，请求却以异常结束、没有回答（性能检测全链路中 11 轮） | 收尾对任何模型侧错误都退回确定性摘要，trace 注明原因 | `finalizer.finalizer`；`test_graph.py::TestFinalizerNeverRaises` | L0 |
 
 ### E · 依赖裁剪与轻量化
 
@@ -89,8 +89,9 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 | 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
 |---|---|---|---|---|
 | E-1 | 协议层与客户端不应绑定图引擎 | `langgraph` 拆为可选依赖 `[graph]`，协议/传输/客户端仅依赖 pydantic | `pyproject.toml`；60 个测试在无 langgraph 时仍可运行 | L0 |
-| E-7 | 图引擎随包导入被无条件加载，纯逻辑模块也要付出其常驻代价 | `miagent.graph` 以 PEP 562 惰性导出 `build_agent`：依赖解析、状态定义、计划 schema 均为纯 Python，不触发图引擎加载 | 该包导入代价由 884 模块 / 69.8 MB 降至 142 模块 / 30.2 MB | L0 |
-| E-8 | 缺少防止分层退化的机制 | 双向守卫：瘦客户端形态涉及的十个模块，在独立子进程中导入后既不得出现 langgraph / langchain_core / langsmith / requests 等已知重依赖（黑名单），加载的第三方包也不得超出 pydantic 及其依赖（白名单） | `tests/test_layering.py`，23 条用例 | L0 · 版本敏感 |
+| E-7 | 图引擎随包导入被无条件加载，纯逻辑模块也要付出其常驻代价 | 顶层 `miagent` 以 PEP 562 惰性导出 `build_agent` 等常用名字，访问时才导入所在子包；任务内核 `core`、节点与拓扑 `agent` 均为纯 Python，不触发图引擎加载 | `test_layering.py::test_build_agent_is_lazily_exported`；导入代价见第三节 | L0 |
+| E-8 | 缺少防止分层退化的机制 | 双向守卫：瘦客户端形态涉及的十一个模块，在独立子进程中导入后既不得出现 langgraph / langchain_core / langsmith / requests 等已知重依赖（黑名单），加载的第三方包也不得超出 pydantic 及其依赖（白名单） | `tests/test_layering.py`，27 条用例 | L0 · 版本敏感 |
+| E-9 | 状态类型定义在图引擎所在的包里，记忆模块从图包取类型、图包又依赖记忆模块，两者成环：调度算法与记忆管理无法脱离图包单独复用，包间依赖方向也无约束 | 状态模型、调度算法、数据流、校验把关、计划 schema 收为框架无关的任务内核 `core`，节点与拓扑收为 `agent`，框架代码收为 `adapters`；包间依赖自上而下、无环，AST 守卫按允许表逐包核对（只计运行时导入） | `test_layering.py::test_package_dependencies_follow_layering` | L0 |
 
 ### F · 工具体系适配
 
@@ -98,26 +99,27 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 |---|---|---|---|---|
 | F-1 | 本地工具（进程内函数）与 MiClaw 系统工具（走协议）无统一抽象 | 统一 Tool 基类 + 注册表，屏蔽调用方式差异，保留失败模式差异 | `miagent/tools/`；87 个测试覆盖两类工具的统一入口 | L0 |
 | F-6 | 无工具开发规范文档 | 输出标准化开发规范，含声明字段、错误约定、测试要求 | `docs/03-tool-spec.md` | L0 |
-| F-7 | 参数只校验必填项，类型不符会静默通过 —— schema 声明 integer 而模型给出 `"3"` 时，工具拿到的是字符串，调用形式合法而语义错误 | 按 schema 校验类型与枚举，吸收无歧义漂移（`"3"`→`3`、单值→单元素数组），拒绝有歧义的输入与未声明字段；问题一次性全部报出供自修复 | `tools/validation.py`；`test_validation.py` 27 条用例 | L0 |
+| F-7 | 参数只校验必填项，类型不符会静默通过 —— schema 声明 integer 而模型给出 `"3"` 时，工具拿到的是字符串，调用形式合法而语义错误 | 按 schema 校验类型与枚举，吸收无歧义漂移（`"3"`→`3`、单值→单元素数组），拒绝有歧义的输入与未声明字段；问题一次性全部报出供自修复 | `tools/validation.py`；`test_validation.py` 30 条用例 | L0 |
 
 ### G · 任务调度
 
 | 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
 |---|---|---|---|---|
-| G-2 | 无步数与预算上限，模型可能陷入死循环 | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003。累计执行上限由 Scheduler 在派发前检查，因而顺利执行的流程同样受其约束 | `nodes.scheduler`；`test_graph.py::TestExecutionBudgetBoundsSuccessToo` | L1 |
-| G-3 | 模型可能把目标拆得过细，每一步都是一次真实调用，白白消耗端侧算力 | 规划产出的待执行任务数超过累计执行预算即拒绝——这样的计划在预算内必然跑不完，与其执行到一半才发现不如当场拒绝。上限直接取执行预算，不另立数字 | `nodes._plan`；`test_graph.py::TestPlanSizeIsChecked` | L0 |
-| G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、五态生命周期、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `graph/dag.py`；`test_dag.py` 25 条用例覆盖边界 | L0 |
-| G-5 | 无依赖关系的任务仍被串行执行，浪费 IPC 等待时间 | 以 LangGraph Send 并行派发同层任务；需为 tasks 定义按 id 合并的 reducer，避免多分支写回互相覆盖 | `routers.py` 返回 Send 列表扇出；outcomes 与 execution_count 用 reducer 汇总；实测无依赖任务提速 3.00x | **L2 · 高** |
+| G-2 | 无步数与预算上限，模型可能陷入死循环 | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003。累计执行上限由 Scheduler 在派发前检查，因而顺利执行的流程同样受其约束 | `scheduler.scheduler`；`test_graph.py::TestExecutionBudgetBoundsSuccessToo` | L1 |
+| G-3 | 模型可能把目标拆得过细，每一步都是一次真实调用，白白消耗端侧算力 | 规划产出的待执行任务数超过累计执行预算即拒绝——这样的计划在预算内必然跑不完，与其执行到一半才发现不如当场拒绝。上限直接取执行预算，不另立数字 | `planning._plan`；`test_graph.py::TestPlanSizeIsChecked` | L0 |
+| G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、五态生命周期、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `core/dag.py`；`test_dag.py` 28 条用例覆盖边界 | L0 |
+| G-5 | 无依赖关系的任务仍被串行执行，浪费 IPC 等待时间 | 以 LangGraph Send 并行派发同层任务；需为 tasks 定义按 id 合并的 reducer，避免多分支写回互相覆盖 | `topology.route_after_scheduler` 返回 Fanout 列表，LangGraph 适配层译为 Send 扇出；outcomes 与 execution_count 用 reducer 汇总；实测无依赖任务提速 3.00x | **L2 · 高** |
 | G-6 | 任务图非法（依赖缺失/自依赖/成环）会表现为莫名死锁 | Kahn 拓扑排序在执行前校验，映射 AG-1004；运行期死锁映射 AG-1005 | `dag.validate()`；`test_cyclic_plan_rejected_before_execution` | L0 |
-| G-8 | 「所有任务都到了终态」被当作「目标达成」：重规划跑完一个新任务都没产出时，失败任务不会再有人接手，流程却照常收尾，用户拿到声称完成实则漏做的回答 | 重规划产出为空且情景记忆中有失败记录时判定未达成，错误码取根因（跳过级联失败的 AG-1005，同为自身失败取最近一轮）。失败记录本身不作为判据——重规划成功接手时，前一条路失败是正常剧情 | `nodes.replanner`、`_root_failure`；`test_graph.py::TestCompletionIsVerified` | L0 |
-| G-9 | Evaluator 每轮无条件写回 `failure: None`。重规划失败（如产出的图依赖缺失）后剩余任务照常执行，任一成功即把那个失败抹掉，收尾时报告成功 | 只在判定中止时写 `failure`；重规划的失败一直保留到收尾 | `nodes.evaluator`；`test_graph.py::test_failed_replan_is_not_masked_by_later_successes` | L0 |
-| G-10 | 「没有任务可调度了」被当成「目标达成了」的最后一道判据。计划本身漏掉一步时，每个任务都成功、没有失败记录、重规划也没被触发，任务图这一层完全看不出异常，用户拿到的是一个自信的、漏做的回答 | 判完成与收尾之间插入完成校验：以目标锚（用户目标 + 首次拆解）对照本轮执行记录，判未达成则带着缺口转重规划补做，重规划已达上限则带 AG-1006 收尾。补做同样受无进展判定约束——新任务全是这一轮调过的调用（成败都算）即判 AG-1003 不派发，带副作用的系统调用不会为了补做而发生第二次。一次工具都没调、或已经带着错误码时不做这次推理 | `nodes.verify_goal`、`routers.route_after_goal_verifier`、`build.py` 接入节点与条件边、`ledger.survey` / `accept(standing=)`、`episodic.repeats_calls`；`test_verify.py::TestGoalVerifier`、`TestGoalVerificationEndToEnd` | L1 |
-| G-7 | 任务参数由模型一次性写死，下游任务取不到上游结果，多个工具只是多次互不相干的调用 | 参数中以 `{"$from": "任务 id"}` 引用上游结果，派发前确定性求值；引用即依赖，先后关系由引用派生，不依赖模型再声明一遍 | `graph/dataflow.py`；`test_dataflow.py` 23 条用例 | L0 |
-| G-11 | 一次 invoke 只处理一个请求，多个用户同时发起请求时只能排队串行；若直接多线程并发 invoke，各请求按配额各自派发，MiClaw 调用合计超出 `max_concurrent_calls`，同一对话的两轮同时执行则后一轮看不到前一轮 | 图之上加多请求运行时：每个请求仍是独立的 invoke；同一会话内串行、不同会话并发；在飞请求数受 `max_inflight` 准入（默认 10，暂定）；按 (优先级, 提交先后) 出队。MiClaw 调用配额与模型推理（默认 1 个推理槽）经按优先级排队的资源槽由全部请求共用，请求的优先级键经 contextvars 传入并行分支。槽只在单次调用期间持有，不会循环等待。防饥饿先不做 | `miagent/runtime/`（`Runtime`、`SlotPool`、`build_runtime`）、`nodes.execute`、`LLM._guarded`；`test_runtime.py`、`test_framework_contract.py` 契约六、七 | **L2** |
-| G-12 | 就绪任务按 id 字母序派发：配额放不下全部就绪任务时，关键路径上的任务可能被顺延，整张图多跑一轮；且按字符串排序时 `task_10` 排在 `task_2` 之前，目标锚的步骤排列也因此错位 | 就绪任务按 (-下游最长链长度, 规划序号, id) 排序，下游最长链只沿未终结任务计；任务新增规划序号 `seq`，按模型输出顺序编号、重规划时接续，派发的决胜项与目标锚都改看它 | `dag.downstream_depth` / `ready`、`nodes._build_tasks`、`memory/anchor.py`；`test_dag.py::TestReadyOrder`、`test_graph.py::TestDispatchOrder` | L0 |
-| G-13 | 一次工具都没调的轮次不做完成校验，于是「请求里的事都做不成」（能力不支持、所需权限被拒）与闲聊无从区分，都以完成收尾，经 `task.dispatch` 回给 MiClaw 的 `completed` 为 true（性能检测框架侧全量中 217 轮）；模型也倾向用不相干的工具顶替做不成的部分 | 计划 schema 增加 `unsupported_actions`：规划在同一次调用里列出用户要求执行、但没有对应工具的操作，提示词要求不要用无关工具顶替；闲聊、常识、计算不是操作，不写进来；另设 `direct_answer` 一问，判为直接回答时框架忽略列出的项（实测端侧量级模型会把闲聊原句写进列表），schema 中列为必填、校验接受缺省。它在本轮内不清除，收尾时据此以 AG-1006 结束；完成校验只判能做的部分，不为做不成的事重规划 | `graph/schema.py::TaskPlan.unsupported_actions`、`AgentState.unsupported`、`nodes.planner` / `replanner` / `verify_goal` / `finalizer`；`test_graph.py::TestUnsupportedActions`（含 `direct_answer` 两条） | L0 |
-| G-14 | 关掉语义校验时会把失败报成完成：重规划只要产出新任务就清除 failure，新计划若只接手了与失败无关的任务，失败的部分再无人记起（性能检测消融中带故障的 191 轮） | 账本验收增加 `clear`：之后没有完成校验兜底时（`verify=False`），新计划不清除 failure，按错误码如实报告未达成；代价是恢复成功的轮次也报为未达成 | `memory/ledger.py::accept(clear=)`、`nodes.replanner`；`test_ledger.py::test_without_goal_check_new_tasks_do_not_clear_failure`、`test_graph.py::TestWithoutVerification` | L0 |
-| G-15 | 图结构校验在自修复通道之外：模型写出的依赖指向不存在的任务、依赖自身或成环时，整份计划直接作废，没有改正的机会；重规划时尤其多见（性能检测全链路 28 轮以 AG-1004 收尾，25 轮在重规划） | 结构校验并入计划 schema 的校验：id 不重复、依赖与引用只指向本计划或可依赖的已完成任务、无自依赖、无环，错误原因喂回模型自修复，改不对报 AG-1001；并图后的 `dag.validate` 保留为复核 | `graph/schema.py::_check_structure`、`task_plan_model_for(known=)`；`test_graph.py::test_structural_error_is_repaired` | L0 |
+| G-8 | 「所有任务都到了终态」被当作「目标达成」：重规划跑完一个新任务都没产出时，失败任务不会再有人接手，流程却照常收尾，用户拿到声称完成实则漏做的回答 | 重规划产出为空且情景记忆中有失败记录时判定未达成，错误码取根因（跳过级联失败的 AG-1005，同为自身失败取最近一轮）。失败记录本身不作为判据——重规划成功接手时，前一条路失败是正常剧情 | `planning.replanner`、`_root_failure`；`test_graph.py::TestCompletionIsVerified` | L0 |
+| G-9 | Evaluator 每轮无条件写回 `failure: None`。重规划失败（如产出的图依赖缺失）后剩余任务照常执行，任一成功即把那个失败抹掉，收尾时报告成功 | 只在判定中止时写 `failure`；重规划的失败一直保留到收尾 | `evaluator.evaluator`；`test_graph.py::test_failed_replan_is_not_masked_by_later_successes` | L0 |
+| G-10 | 「没有任务可调度了」被当成「目标达成了」的最后一道判据。计划本身漏掉一步时，每个任务都成功、没有失败记录、重规划也没被触发，任务图这一层完全看不出异常，用户拿到的是一个自信的、漏做的回答 | 判完成与收尾之间插入完成校验：以目标锚（用户目标 + 首次拆解）对照本轮执行记录，判未达成则带着缺口转重规划补做，重规划已达上限则带 AG-1006 收尾。补做同样受无进展判定约束——新任务全是这一轮调过的调用（成败都算）即判 AG-1003 不派发，带副作用的系统调用不会为了补做而发生第二次。一次工具都没调、或已经带着错误码时不做这次推理 | `verifiers.goal_verifier`、`topology.route_after_goal_verifier`、`topology.NODES` / `BRANCHES` 接入节点与条件边、`ledger.survey` / `accept(standing=)`、`episodic.repeats_calls`；`test_verify.py::TestGoalVerifier`、`TestGoalVerificationEndToEnd` | L1 |
+| G-7 | 任务参数由模型一次性写死，下游任务取不到上游结果，多个工具只是多次互不相干的调用 | 参数中以 `{"$from": "任务 id"}` 引用上游结果，派发前确定性求值；引用即依赖，先后关系由引用派生，不依赖模型再声明一遍 | `core/dataflow.py`；`test_dataflow.py` 30 条用例 | L0 |
+| G-11 | 一次 invoke 只处理一个请求，多个用户同时发起请求时只能排队串行；若直接多线程并发 invoke，各请求按配额各自派发，MiClaw 调用合计超出 `max_concurrent_calls`，同一对话的两轮同时执行则后一轮看不到前一轮 | 图之上加多请求运行时：每个请求仍是独立的 invoke；同一会话内串行、不同会话并发；在飞请求数受 `max_inflight` 准入（默认 10，暂定）；按 (优先级, 提交先后) 出队。MiClaw 调用配额与模型推理（默认 1 个推理槽）经按优先级排队的资源槽由全部请求共用，请求的优先级键经 contextvars 传入并行分支。槽只在单次调用期间持有，不会循环等待。防饥饿先不做 | `miagent/runtime/`（`Runtime`、`SlotPool`、`build_runtime`）、`executor.executor`、`LLM._guarded`；`test_runtime.py`、`test_framework_contract.py` 契约六、七 | **L2** |
+| G-12 | 就绪任务按 id 字母序派发：配额放不下全部就绪任务时，关键路径上的任务可能被顺延，整张图多跑一轮；且按字符串排序时 `task_10` 排在 `task_2` 之前，目标锚的步骤排列也因此错位 | 就绪任务按 (-下游最长链长度, 规划序号, id) 排序，下游最长链只沿未终结任务计；任务新增规划序号 `seq`，按模型输出顺序编号、重规划时接续，派发的决胜项与目标锚都改看它 | `dag.downstream_depth` / `ready`、`planning._build_tasks`、`memory/anchor.py`；`test_dag.py::TestReadyOrder`、`test_graph.py::TestDispatchOrder` | L0 |
+| G-16 | 循环出口的上限（单任务执行次数、重规划次数、累计执行次数）是模块级常量，同一进程里的多个 Agent 只能共用一组值，按部署形态调整只能改源码 | 上限收为 `Limits`，经 `Deps` 注入节点，`build_agent(limits=...)` 按 Agent 给定；默认值不变 | `agent/deps.py::Limits`；`test_graph.py::test_limits_are_per_agent` | L0 |
+| G-13 | 一次工具都没调的轮次不做完成校验，于是「请求里的事都做不成」（能力不支持、所需权限被拒）与闲聊无从区分，都以完成收尾，经 `task.dispatch` 回给 MiClaw 的 `completed` 为 true（性能检测框架侧全量中 217 轮）；模型也倾向用不相干的工具顶替做不成的部分 | 计划 schema 增加 `unsupported_actions`：规划在同一次调用里列出用户要求执行、但没有对应工具的操作，提示词要求不要用无关工具顶替；闲聊、常识、计算不是操作，不写进来；另设 `direct_answer` 一问，判为直接回答时框架忽略列出的项（实测端侧量级模型会把闲聊原句写进列表），schema 中列为必填、校验接受缺省。它在本轮内不清除，收尾时据此以 AG-1006 结束；完成校验只判能做的部分，不为做不成的事重规划 | `core/schema.py::TaskPlan.unsupported_actions`、`AgentState.unsupported`、`planning.planner` / `replanner`、`verifiers.goal_verifier`、`finalizer.finalizer`；`test_graph.py::TestUnsupportedActions`（含 `direct_answer` 两条） | L0 |
+| G-14 | 关掉语义校验时会把失败报成完成：重规划只要产出新任务就清除 failure，新计划若只接手了与失败无关的任务，失败的部分再无人记起（性能检测消融中带故障的 191 轮） | 账本验收增加 `clear`：之后没有完成校验兜底时（`verify=False`），新计划不清除 failure，按错误码如实报告未达成；代价是恢复成功的轮次也报为未达成 | `memory/ledger.py::accept(clear=)`、`planning.replanner`；`test_ledger.py::test_without_goal_check_new_tasks_do_not_clear_failure`、`test_graph.py::TestWithoutVerification` | L0 |
+| G-15 | 图结构校验在自修复通道之外：模型写出的依赖指向不存在的任务、依赖自身或成环时，整份计划直接作废，没有改正的机会；重规划时尤其多见（性能检测全链路 28 轮以 AG-1004 收尾，25 轮在重规划） | 结构校验并入计划 schema 的校验：id 不重复、依赖与引用只指向本计划或可依赖的已完成任务、无自依赖、无环，错误原因喂回模型自修复，改不对报 AG-1001；并图后的 `dag.validate` 保留为复核 | `core/schema.py::_check_structure`、`task_plan_model_for(known=)`；`test_graph.py::test_structural_error_is_repaired` | L0 |
 
 
 ### H · 框架版本风险控制
@@ -127,9 +129,10 @@ LangGraph 的部分行为约定写在文档而非类型签名里，升级失配�
 
 | 编号 | 差异点 | 改造内容 | 落地位置 / 验证 | 侵入面 |
 |---|---|---|---|---|
-| H-1 | 框架接触面无约束，任何模块都可 import langgraph，升级的影响范围不可枚举 | AST 扫描守卫，只允许构图与路由两个模块 import langgraph；新增即失败并要求更新风险分级 | `test_layering.py::test_framework_surface_is_confined` | L0 |
+| H-1 | 框架接触面无约束，任何模块都可 import langgraph，升级的影响范围不可枚举 | AST 扫描守卫，只允许 LangGraph 适配层的构图模块 import langgraph；新增即失败并要求更新风险分级 | `test_layering.py::test_framework_surface_is_confined` | L0 |
 | H-2 | 所依赖的框架语义约定无测试覆盖，升级失配时静默失效 | 框架契约测试：以最小图逐条固化 Send payload 范围、reducer 合并时机、条件边返回类型、中断恢复、并行分支继承调用方 contextvars、同一编译图并发 invoke 的状态隔离，不引用业务模块 | `tests/test_framework_contract.py`，7 条用例 | L1（仅测试代码） |
 | H-3 | 版本声明无上限，升级可在无人察觉时发生 | 收紧为 `langgraph>=1.2,<2.0`，实测通过版本记录在文档抬头 | `pyproject.toml` | L0 |
+| H-4 | 节点、路由与构图代码同在一个图包里，节点的连接方式只存在于调用框架 API 的代码中：换编排框架时要改的范围须逐文件甄别 | 图拓扑（节点、固定边、条件边、路由规则）写成框架无关的声明 `agent.topology`，扇出以 `Fanout` 表达；LangGraph 适配层照声明构图并把 `Fanout` 译为 `Send`，是唯一 import langgraph 的模块。适配层须兑现的四条约定写在 `miagent.adapters` 的说明里 | `adapters/langgraph/build.py`；`test_conventions.py::test_topology_is_closed`、`test_node_ids_match_implementations` | L1 |
 
 ---
 
@@ -154,24 +157,26 @@ L2 不报错，问题会以「结果偶尔不对」的形式潜伏，排查成�
 
 | 级别 | 项数 | 编号 |
 |---|---|---|
-| L0 | 50 | A 组全部、B 组全部、C-2、C-3、C-7、C-8、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、G-13、G-14、G-15、H-1、H-3 |
-| L1 | 5 | C-6、D-10、G-2、G-10、H-2 |
+| L0 | 52 | A 组全部、B 组全部、C-2、C-3、C-7、C-8、D 组除 D-10 外全部、E 组全部、F 组全部、G-3、G-4、G-6、G-7、G-8、G-9、G-12、G-13、G-14、G-15、G-16、H-1、H-3 |
+| L1 | 6 | C-6、D-10、G-2、G-10、H-2、H-4 |
 | L2 | 2 | **G-5**、**G-11** |
 | L3 | 0 | — |
 
-合计 57 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
+合计 60 项：第 1 周完成 26 项，H 组 3 项为风险分级过程中识别并补齐，
 B-7、B-8、C-7、D-2、D-3、F-7、G-3、G-7、G-8 为第 2 周新增，
 D-6、D-7、D-8、D-9、D-10、G-9、G-10 为第 3 周新增，
 A-7、A-8、A-9、C-8、D-11、G-11、G-12 为多请求并发与调度优先级改造新增，
-D-12、D-13、G-13、G-14、G-15 为第 4 周性能检测暴露后修复。
+D-12、D-13、G-13、G-14、G-15 为第 4 周性能检测暴露后修复，
+E-9、G-16、H-4 为第 4 周规范化封装新增。
 
 **当前没有 L3 项**：未修改框架源码、未做 monkey patch、未引用任何私有模块。
 这是选型时「流程可控、不存在隐式框架行为」的直接收益——业务逻辑绝大部分落在框架之外，
 升级面因此收敛得很窄。
 
-框架接触面同样是收敛的：整个 `miagent/` 下只有 `graph/build.py`（构图）与 `graph/routers.py`（路由）
-两个文件 import langgraph。这一点由 `test_framework_surface_is_confined` 用 AST 扫描强制——
-新增第三个框架依赖会立刻测试失败，并要求同步更新本节的风险分级。接触面可枚举，回退才谈得上可行。
+框架接触面同样是收敛的：节点与图拓扑都是框架无关的声明（`miagent.agent`），整个 `miagent/` 下
+只有 `adapters/langgraph/build.py` 一个文件 import langgraph，它照拓扑声明构图。这一点由
+`test_framework_surface_is_confined` 用 AST 扫描强制——新增框架依赖会立刻测试失败，
+并要求同步更新本节的风险分级。接触面可枚举，回退才谈得上可行。
 
 ### 高风险项 G-5：并行任务派发
 
@@ -187,16 +192,16 @@ G-5 以 `Send` 扇出同层任务，依赖两条**语义约定**：
 | 约定失效 | 静默表现 |
 |---|---|
 | payload 改为与主 state 合并 | 节点若改回返回绝对值，多分支写回互相覆盖，计数与结果都偏 |
-| 整数 reducer 不再累加 | `execution_count` 计数偏低，`MAX_TOTAL_EXECUTIONS` 这道循环出口失效（G-2 随之失效） |
+| 整数 reducer 不再累加 | `execution_count` 计数偏低，`Limits.max_total_executions` 这道循环出口失效（G-2 随之失效） |
 | 空列表返回被视为「无更新」而跳过合并 | `outcomes` 不再被清空，Evaluator 下一轮重复消费上一轮结果 |
 
 **检测手段**：`tests/test_framework_contract.py` 用最小图逐条固化上述约定，
 不引用任何业务模块。升级时先跑这一组，失败能直接指出是哪条约定变了，
 不必从业务测试的失败里反推。
 
-**回退路径**：G-5 的框架相关部分只在 `routers.py` 的一个函数里。
-调度决策（哪些任务就绪、并发配额如何分配）都在 `scheduler` 节点与 `dag.py` 的纯函数中，
-与框架无关。因此降级为串行执行只需改路由返回值，任务图与调度语义不受影响。
+**回退路径**：G-5 的框架相关部分只是适配层里把 `Fanout` 译为 `Send` 的一处。
+调度决策（哪些任务就绪、并发配额如何分配）都在 `scheduler` 节点与 `core/dag.py` 的纯函数中，
+与框架无关。因此降级为串行执行只需改这一处翻译，任务图与调度语义不受影响。
 
 ### 高风险项 G-11：多请求运行时
 
@@ -214,7 +219,7 @@ G-11 的运行时本身不 import langgraph，但依赖两条**语义约定**：
 **检测手段**：`test_framework_contract.py` 契约六、七。
 
 **回退路径**：优先级键改为显式传递——调度器写进 `DispatchItem`、随 `Send` 的 payload 带到执行节点，
-模型调用则由节点从状态里取。改动落在 `scheduler`、`routers.py` 与调模型的节点，资源槽与运行时不变。
+模型调用则由节点从状态里取。改动落在 `scheduler`、`topology.route_after_scheduler` 与调模型的节点，资源槽与运行时不变。
 第二条若失效，退回每个请求各编译一张图。
 
 ### 版本敏感项 E-8：分层守卫的依赖假设
@@ -257,11 +262,11 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 | 部署形态 | 常驻内存 | 冷启动 | 加载模块数 | 其中云端/网络相关 |
 |---|---|---|---|---|
 | 裸解释器 | 约 17 MB | — | — | — |
-| 瘦客户端 | 约 30 MB | 约 53 ms | 138 | 0（0%） |
-| 完整 Agent | 约 70 MB | 约 276 ms | 887 | 334（37%） |
+| 瘦客户端 | 约 30 MB | 约 56 ms | 151 | 0（0%） |
+| 完整 Agent | 约 71 MB | 约 277 ms | 896 | 334（37%） |
 
 瘦客户端形态涵盖协议、传输、客户端、工具、模型五层，可完成系统调用转发与工具调度，
-不含任务规划与依赖调度；完整形态在其上追加图引擎。图引擎的边际成本为常驻约 +40 MB、冷启动约 +223 ms、模块 +749。
+不含任务规划与依赖调度；完整形态在其上追加图引擎。图引擎的边际成本为常驻约 +40 MB、冷启动约 +221 ms、模块 +745。
 
 > **关于验收阈值**：任务书要求「使其满足 MiMo 端侧大模型的运行资源要求」，
 > 但未给出具体数值，MiClaw 侧的真实资源配额亦不可获取。因此本文档只记录实测值，
@@ -279,16 +284,16 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 | websockets | 0.8 MB | 端侧不需要 |
 | httpx / requests / urllib3 | 约 0.4 MB（147 模块） | 端侧走 stdio，不需要 |
 
-完整 Agent 形态加载的 887 个模块中，334 个（37%）属于上表中端侧不需要的云端与网络栈。
+完整 Agent 形态加载的 896 个模块中，334 个（37%）属于上表中端侧不需要的云端与网络栈。
 这些模块由 `langchain_core` 与 `langgraph_sdk` 在模块层面具名引入，是 LangGraph 的
-传递依赖。轻量化因此采取限制影响范围的路径：图引擎降为可选依赖（E-1）、包级惰性
+传递依赖。轻量化因此采取限制影响范围的路径：图引擎降为可选依赖（E-1）、顶层惰性
 导出使纯逻辑模块不触发其加载（E-7）、并以自动化守卫防止分层退化（E-8）。
 
 ---
 
 ## 四、验证方式
 
-规约与改造的全部约定均以测试代码固化，当前累计 447 条用例。
+规约与改造的全部约定均以测试代码固化，当前累计 588 条用例。
 
 | 验证项 | 方式 |
 |---|---|
@@ -299,8 +304,10 @@ E-8 的黑名单（langgraph / langchain_core / langsmith / requests / httpx / u
 | 资源约束 | 超出下发配额的工具调用被拦截，detail 中给出实际值与上限 |
 | 依赖解析 | 就绪判定、级联失败、完成与死锁检测、环检测均以纯函数实现，边界情况穷举覆盖 |
 | 上下文清理 | 终态任务的结算、去重、降级与合并视图均以纯函数实现；重规划后任务图只含新任务与被引用的已完成任务；对话历史从最旧的一轮开始削减 |
-| 分层隔离 | 瘦客户端形态涉及的十个模块在独立子进程中导入后，不出现图引擎及其云端传递依赖 |
+| 分层隔离 | 瘦客户端形态涉及的十一个模块在独立子进程中导入后，不出现图引擎及其云端传递依赖 |
 | 框架契约 | 所依赖的 LangGraph 语义以最小图逐条固化，升级失配可定位到具体约定 |
 | 语义校验 | 什么值得校验、判定能改动什么、修正参数的三道闸均以纯函数实现并穷举覆盖；校验不可用时退回原判定，端到端验证参数偏差就地修正与漏做被补上 |
-| 接触面收敛 | AST 扫描确认只有构图与路由两个模块 import langgraph；模型调用范围以 AST 扫描限定在规划、校验、收尾三类环节 |
+| 接触面收敛 | AST 扫描确认只有 LangGraph 适配层的构图模块 import langgraph；模型调用范围以 AST 扫描限定在规划、校验、收尾三类环节 |
+| 分层方向 | 各包的运行时依赖按允许表逐包核对，自上而下、无环；core、memory、agent 不依赖适配层与运行时 |
+| 代码规范 | 模块命名、文档字符串、分节注释形式、节点名与实现同名、拓扑闭合，均由 `test_conventions.py` 检查 |
 | 可测试性 | 每一层可独立测试，不依赖上层 |

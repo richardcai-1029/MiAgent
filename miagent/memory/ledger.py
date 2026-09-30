@@ -14,7 +14,7 @@ Replanner 与 Finalizer 面对的是同一件事：把到了终态的任务从�
 
 failure 的规则在这里兑现：成功的重规划清除它（新计划按构造覆盖了全部
 失败记录），重规划未产出新任务则取根因码，新计划全是失败过的调用则判无进展。
-单个任务成功不清除 failure —— 那是节点侧的约定，见 graph.state。
+单个任务成功不清除 failure —— 那是节点侧的约定，见 core.state。
 
 ★ 本模块是纯函数：不调用模型、不 import langgraph、没有副作用。
    episodes 只增不改：返回给节点的是新增的部分，由 reducer 追加；
@@ -26,8 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..graph import dag
-from ..graph.state import Episode, Task, TaskStatus
+from ..core import dag
+from ..core.state import Episode, Task, TaskStatus
 from ..protocol import ErrorCode
 from . import episodic
 

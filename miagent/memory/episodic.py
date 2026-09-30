@@ -10,7 +10,7 @@
 渲染按条给出两种形式（见 Line）：带结果原文的完整形式，与去掉原文的简要形式。
 提示词放不下时用哪一种，由上下文预算逐条决定，不在这里决定。
 
-Episode 的类型定义在 graph.state（它是 State 的元素）；本模块是它的行为。
+Episode 的类型定义在 core.state（它是 State 的元素）；本模块是它的行为。
 节点不直接调用这里的函数 —— 结算的步骤由 ledger 编排，这里是账本的内部接缝。
 
 ★ 本模块是纯函数：不依赖 LangGraph、不调用模型、没有副作用。
@@ -23,8 +23,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ..graph import dag
-from ..graph.state import Episode, Task, TaskStatus
+from ..core import dag
+from ..core.state import Episode, Task, TaskStatus
 
 __all__ = ["Episode", "Line", "args_digest", "settle", "dedupe", "repeats_calls",
            "render", "history", "summarize"]

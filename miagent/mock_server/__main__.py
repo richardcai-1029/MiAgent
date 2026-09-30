@@ -12,6 +12,7 @@ from .server import MiClawMockServer
 
 
 def main() -> None:
+    """以 stdio 为传输启动 mock 服务端，逐行读报文、写响应，直到对端关闭。"""
     transport = StdioServerTransport()
     server = MiClawMockServer()
     log("[server] MiClaw mock 已启动，等待报文…")

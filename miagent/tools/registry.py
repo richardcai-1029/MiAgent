@@ -20,12 +20,16 @@ if TYPE_CHECKING:
 
 
 class ToolRegistry:
+    """工具注册表：按名字登记本地与 MiClaw 工具，对模型给统一的 schema，对框架给来源与开销。"""
+
     def __init__(self, tools: list[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         for t in tools or []:
             self.register(t)
 
-    # ---------- 注册 ----------
+    # ------------------------------------------------------------
+    # 注册
+    # ------------------------------------------------------------
 
     def register(self, tool: Tool) -> Tool:
         if tool.name in self._tools:
@@ -51,7 +55,9 @@ class ToolRegistry:
         self.register_all(loaded)
         return loaded
 
-    # ---------- 查询 ----------
+    # ------------------------------------------------------------
+    # 查询
+    # ------------------------------------------------------------
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -68,7 +74,9 @@ class ToolRegistry:
     def __iter__(self) -> Iterator[Tool]:
         return iter(self._tools.values())
 
-    # ---------- 两类调用方各取所需 ----------
+    # ------------------------------------------------------------
+    # 两类调用方各取所需
+    # ------------------------------------------------------------
 
     def to_model_schemas(self) -> list[dict[str, Any]]:
         """给模型的工具列表。不含 source / 权限 / 开销。"""

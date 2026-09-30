@@ -28,7 +28,7 @@ granted = client.connect(
     intents=["alarm.create", "message.send"],
 )
 print(f"\n  会话 ID   : {client.session_id}")
-print(f"  申请权限   : ['sms.send', 'alarm.write', 'contacts.read', 'screen.capture']")
+print("  申请权限   : ['sms.send', 'alarm.write', 'contacts.read', 'screen.capture']")
 print(f"  批准权限   : {granted}")
 print(f"  被拒权限   : {[d['permission'] + ' (' + d['code'] + ')' for d in client.denied_permissions]}")
 print(f"  资源配额   : 内存上限 {client.budget.max_memory_mb}MB，"

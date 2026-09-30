@@ -6,10 +6,10 @@
 
 import pytest
 
-from miagent.graph import dataflow
-from miagent.graph.nodes import _build_tasks
-from miagent.graph.schema import TaskSpec
-from miagent.graph.state import TaskStatus, new_task
+from miagent.core import dataflow
+from miagent.agent.planning import _build_tasks
+from miagent.core.schema import TaskSpec
+from miagent.core.state import TaskStatus, new_task
 from miagent.protocol import AgentError, ErrorCode
 
 REF = dataflow.REFERENCE_KEY

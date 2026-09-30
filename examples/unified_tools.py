@@ -67,7 +67,7 @@ title("② 模型视角：看不到来源、权限、开销")
 schemas = registry.to_model_schemas()
 print(f"  模型拿到 {len(schemas)} 个工具，每个只有三个字段: "
       f"{list(schemas[0].keys())}")
-print(f"\n  举例（system.send_sms，模型无从得知它走 IPC 且需要权限）:")
+print("\n  举例（system.send_sms，模型无从得知它走 IPC 且需要权限）:")
 sms = next(s for s in schemas if s["name"] == "system.send_sms")
 print("   ", json.dumps(sms, ensure_ascii=False, indent=2).replace("\n", "\n    "))
 

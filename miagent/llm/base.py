@@ -1,7 +1,8 @@
 """大模型接口抽象。
 
-设计目标是让上层（图节点）完全不知道底下是哪个模型：
-Fake（测试）、MiMo 端侧、云端 API 三种实现共享同一契约，可热切换。
+设计目标是让上层（Agent 节点）完全不知道底下是哪个模型：
+FakeLLM（测试）与 OpenAI 兼容端点（通义千问、Ollama 本地部署）共享同一契约，
+可热切换；MiMo 等其他后端实现同一契约即可接入。
 
 接口刻意保持最小 —— 只有「给一段对话，返回一段文本」。
 把文本解析成计划、判断解析是否成功，都是上层的事，不属于模型层。
@@ -35,6 +36,8 @@ Role = Literal["system", "user", "assistant"]
 
 @dataclass(frozen=True)
 class LLMMessage:
+    """对话中的一条消息。"""
+
     role: Role
     content: str
 
@@ -45,6 +48,8 @@ class LLMMessage:
 
 @dataclass(frozen=True)
 class LLMResponse:
+    """一次补全的结果：文本与计量信息（耗时、提示词长度、模型名）。"""
+
     content: str
     elapsed_ms: float = 0.0
     prompt_chars: int = 0
@@ -55,14 +60,17 @@ class LLMResponse:
 
 
 def system(content: str) -> LLMMessage:
+    """构造一条 system 消息。"""
     return LLMMessage("system", content)
 
 
 def user(content: str) -> LLMMessage:
+    """构造一条 user 消息。"""
     return LLMMessage("user", content)
 
 
 def assistant(content: str) -> LLMMessage:
+    """构造一条 assistant 消息。"""
     return LLMMessage("assistant", content)
 
 

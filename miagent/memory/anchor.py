@@ -16,13 +16,14 @@
 
 from __future__ import annotations
 
-from ..graph.state import Anchor, Task
+from ..core.state import Anchor, Task
 from ..llm.context import Section
 
 __all__ = ["Anchor", "build", "render"]
 
 
 def build(goal: str, tasks: dict[str, Task]) -> Anchor:
+    """由用户目标与首次规划的任务图生成目标锚，各步描述按规划序号排列。"""
     ordered = sorted(tasks.values(), key=lambda t: t["seq"])
     return Anchor(goal=goal, intent=[t["description"] for t in ordered])
 

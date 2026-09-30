@@ -1,7 +1,8 @@
-"""节点运行所需的外部依赖。
+"""节点运行所需的外部依赖与循环出口的上限。
 
-单独成模块，使 `miagent.graph` 的导出不必触及 nodes 与 build ——
-后者会引入图引擎。
+每个节点都是 `(state, deps) -> 增量` 的普通函数，节点之外的一切 —— 模型、
+工具、并发配额、退避、上限 —— 都经 Deps 注入。编排框架只负责把 deps 绑定到
+节点上（见 miagent.adapters），换框架时这里不变。
 """
 
 from __future__ import annotations
@@ -17,8 +18,21 @@ if TYPE_CHECKING:
     from ..runtime.slots import SlotPool
 
 
+@dataclass(frozen=True)
+class Limits:
+    """循环出口的兜底上限。模型输出再离谱，一次请求也会在这些上限内结束。"""
+
+    max_attempts_per_task: int = 2    # 单个任务最多执行几次（含首次）
+    max_replans: int = 2              # 最多重规划几次，超出 -> AG-1003
+    # 单次请求累计最多执行几次工具，超出 -> AG-1002。
+    # 一份计划拆出的任务数也以它为上限：超出预算的计划在预算内必然跑不完。
+    max_total_executions: int = 20
+
+
 @dataclass
 class Deps:
+    """节点运行所需的全部外部依赖。由适配层构造一次，绑定到每个节点上。"""
+
     llm: LLM
     registry: ToolRegistry
     # MiClaw 侧并发上限，取自握手时下发的 ResourceBudget.max_concurrent_calls。
@@ -38,8 +52,8 @@ class Deps:
     # ⚠️ 默认值无外部依据，仅为占位：MiClaw 的资源配额未定义退避时长。
     #    真实数值应由 MiClaw 规范或项目决策给定后替换。
     #
-    # 单任务重试上限见 MAX_ATTEMPTS_PER_TASK，故一次任务至多退避一次，
-    # 退避时长是单一固定值。
+    # 单任务执行次数上限见 Limits.max_attempts_per_task，默认下一次任务
+    # 至多退避一次，退避时长是单一固定值。
     retry_delay_ms: int = 200
 
     # 等待的实现可注入，使退避行为能在测试中被观察，不必真的等。
@@ -51,3 +65,6 @@ class Deps:
     # 因此关掉之后执行失败不会被报成完成，代价是恢复成功的轮次也报为未达成。
     # 模型漏做一步、参数写偏这类没有失败记录的偏差，关掉之后就发现不了。
     verify: bool = True
+
+    # 循环出口的上限。不同部署形态可以给不同的值，默认值见 Limits。
+    limits: Limits = field(default_factory=Limits)

@@ -6,16 +6,13 @@ import re
 import pytest
 
 from miagent.client import MiClawClient
-from miagent.graph import build_agent, dag, initial_state
-from miagent.graph.nodes import (Deps, evaluator, execute, finalizer,
-                                 planner, scheduler, _tools_section)
-from miagent.graph.routers import (route_after_evaluator,
-                                   route_after_goal_verifier,
-                                   route_after_scheduler)
-from langgraph.types import Send
-
-from miagent.graph.state import (MAX_REPLANS, MAX_TOTAL_EXECUTIONS,
-                                 TaskOutcome, TaskStatus, new_task)
+from miagent import build_agent, initial_state
+from miagent.core import dag
+from miagent.agent import Deps, Limits, evaluator, executor, finalizer, planner, scheduler
+from miagent.agent.prompting import tools_section
+from miagent.agent.topology import (Fanout, route_after_evaluator,
+                                    route_after_goal_verifier, route_after_scheduler)
+from miagent.core.state import TaskOutcome, TaskStatus, new_task
 from miagent.llm import FakeLLM
 from miagent.mock_server import MiClawMockServer
 from miagent.protocol import ErrorCode
@@ -182,14 +179,15 @@ class TestSchedulerIsDeterministic:
 class TestEvaluator:
     """判定不依赖模型 —— 结论由错误码的段位决定。"""
 
-    def _run(self, ok, policy, code=None, attempt=1, replans=0, executions=0):
+    def _run(self, ok, policy, code=None, attempt=1, replans=0, executions=0, limits=None):
         s = initial_state("t")
         s["tasks"] = {"A": new_task("A", "", "echo")}
         s["replan_count"] = replans
         s["execution_count"] = executions
         s["outcomes"] = [TaskOutcome(task_id="A", tool="echo", ok=ok, content="c",
                                      error_code=code, retry_policy=policy, attempt=attempt)]
-        return evaluator(s, Deps(llm=FakeLLM(script=[]), registry=ToolRegistry()))
+        return evaluator(s, Deps(llm=FakeLLM(script=[]), registry=ToolRegistry(),
+                                 limits=limits or Limits()))
 
     def test_success_marks_done(self):
         out = self._run(True, "none")
@@ -208,13 +206,21 @@ class TestEvaluator:
         assert out["tasks"]["A"]["status"] is TaskStatus.FAILED
 
     def test_replan_limit_aborts(self):
-        out = self._run(False, "degrade", "MC-4001", replans=MAX_REPLANS)
+        out = self._run(False, "degrade", "MC-4001", replans=Limits().max_replans)
         assert out["verdict"] == "abort"
         assert out["failure"] == ErrorCode.AG_PLAN_NO_PROGRESS.value
 
     def test_execution_budget_aborts(self):
         out = self._run(False, "none", "AG-2001", executions=999)
         assert out["failure"] == ErrorCode.AG_PLAN_MAX_STEPS_EXCEEDED.value
+
+    def test_limits_are_per_agent(self):
+        """上限经 Deps 注入：同一份节点代码，按部署形态给不同的上限。"""
+        no_replan = Limits(max_replans=0)
+        out = self._run(False, "degrade", "MC-4001", limits=no_replan)
+        assert out["verdict"] == "abort"
+        out = self._run(False, "backoff", "MC-1003", limits=Limits(max_attempts_per_task=1))
+        assert out["verdict"] == "replan"                       # 不再重试，直接换方案
 
 
     def test_aggregates_multiple_outcomes(self):
@@ -248,12 +254,12 @@ class TestRouters:
         assert route_after_scheduler({"dispatch": []}) == "goal_verifier"
 
     def test_after_scheduler_fans_out(self):
-        """返回 Send 列表即并行派发；本地与 MiClaw 可在同一轮扇出到不同节点。"""
+        """返回 Fanout 列表即并行派发；本地与 MiClaw 可在同一轮扇出到不同节点。"""
         t = new_task("A", "", "echo")
         sends = route_after_scheduler({"dispatch": [
             {"task": t, "route": "local"}, {"task": t, "route": "miclaw"}]})
-        assert [x.node for x in sends] == ["local_tool", "mcp_executor"]
-        assert all(isinstance(x, Send) for x in sends)
+        assert [x.node for x in sends] == ["local_executor", "miclaw_executor"]
+        assert all(isinstance(x, Fanout) for x in sends)
 
     def test_after_evaluator(self):
         for v, node in [("success", "scheduler"), ("retry", "scheduler"),
@@ -425,8 +431,9 @@ def test_model_is_confined_to_planning_nodes():
     """
     from pathlib import Path
 
-    nodes_py = Path(__file__).resolve().parent.parent / "miagent" / "graph" / "nodes.py"
-    touching = _functions_touching("deps", "llm", nodes_py)
+    agent_dir = Path(__file__).resolve().parent.parent / "miagent" / "agent"
+    touching = set().union(*(_functions_touching("deps", "llm", p)
+                             for p in agent_dir.glob("*.py")))
 
     # _plan 是 Planner 与 Replanner 共用的规划实现；_review 是两个校验节点
     # 共用的调用实现；finalizer 生成给用户的回答。
@@ -555,7 +562,7 @@ class TestRetryBackoff:
     def test_first_attempt_does_not_wait(self, registry):
         waits = []
         payload = {"task": new_task("t1", "任务 t1", "echo", {"text": "x"})}
-        out = execute(payload, self._deps(registry, waits), ToolSource.LOCAL)
+        out = executor(payload, self._deps(registry, waits), ToolSource.LOCAL)
         assert waits == []
         assert out["outcomes"][0]["ok"]
 
@@ -563,7 +570,7 @@ class TestRetryBackoff:
         waits = []
         task = new_task("t1", "任务 t1", "echo", {"text": "x"})
         task["retry_count"] = 1                 # 已失败过一次，本次是重试
-        out = execute({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
+        out = executor({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
         assert waits == [0.25], "重试没有退避，或退避时长换算错误"
         assert out["outcomes"][0]["attempt"] == 2
 
@@ -571,7 +578,7 @@ class TestRetryBackoff:
         waits = []
         task = new_task("t1", "任务 t1", "echo", {"text": "x"})
         task["retry_count"] = 1
-        out = execute({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
+        out = executor({"task": task}, self._deps(registry, waits), ToolSource.LOCAL)
         assert "退避 250ms" in out["trace"][0]
 
 
@@ -583,7 +590,7 @@ class TestContextBudget:
         整段丢掉则连选都无从选起。"""
         from miagent.llm.context import Section, fit
 
-        body, notes = fit([_tools_section(registry), Section("目标", "目标：查电量")],
+        body, notes = fit([tools_section(registry), Section("目标", "目标：查电量")],
                           limit=300, estimate=len)
         assert notes == ["工具描述→紧凑形式"]
         assert "system.get_battery" in body, "工具名应当保留"
@@ -616,7 +623,7 @@ class TestContextBudget:
 
     def test_replanner_trims_only_the_oversized_result(self, registry):
         """一条结果超长只让它自己换成简要形式：其余结论、失败记录与 id 都还在。"""
-        from miagent.graph.nodes import replanner
+        from miagent.agent import replanner
         from miagent.memory import anchor as anchor_mod
 
         huge = new_task("t1", "截屏识别", "echo")
@@ -668,7 +675,7 @@ class TestPlanSizeIsChecked:
 
     def _oversized(self):
         return plan(*[task(f"t{i}", "echo", text=str(i))
-                      for i in range(MAX_TOTAL_EXECUTIONS + 1)])
+                      for i in range(Limits().max_total_executions + 1)])
 
     def test_oversized_plan_is_rejected_before_any_execution(self, registry):
         out = run(registry, "做很多事", llm_for(self._oversized()))
@@ -680,9 +687,9 @@ class TestPlanSizeIsChecked:
         """恰好等于预算的计划仍然可执行 —— 判据是「超过」而非「接近」。"""
         out = run(registry, "做很多事", llm_for(
             plan(*[task(f"t{i}", "echo", text=str(i))
-                   for i in range(MAX_TOTAL_EXECUTIONS)])))
+                   for i in range(Limits().max_total_executions)])))
         assert out["failure"] is None
-        assert len(out["tasks"]) == MAX_TOTAL_EXECUTIONS
+        assert len(out["tasks"]) == Limits().max_total_executions
 
     def test_rejected_plan_still_answers_the_user(self, registry):
         out = run(registry, "做很多事", llm_for(self._oversized()))
@@ -699,7 +706,7 @@ class TestExecutionBudgetBoundsSuccessToo:
     def test_scheduler_stops_dispatching_at_the_budget(self, registry):
         state = initial_state("x")
         state["tasks"] = {"t1": new_task("t1", "任务 t1", "echo", {"text": "a"})}
-        state["execution_count"] = MAX_TOTAL_EXECUTIONS
+        state["execution_count"] = Limits().max_total_executions
 
         out = scheduler(state, self._deps(registry))
         assert out["dispatch"] == []
@@ -708,7 +715,7 @@ class TestExecutionBudgetBoundsSuccessToo:
     def test_below_the_budget_still_dispatches(self, registry):
         state = initial_state("x")
         state["tasks"] = {"t1": new_task("t1", "任务 t1", "echo", {"text": "a"})}
-        state["execution_count"] = MAX_TOTAL_EXECUTIONS - 1
+        state["execution_count"] = Limits().max_total_executions - 1
 
         out = scheduler(state, self._deps(registry))
         assert len(out["dispatch"]) == 1
@@ -835,7 +842,7 @@ class TestGoalAnchor:
         from miagent.memory import anchor as anchor_mod
 
         a = anchor_mod.render(anchor_mod.build("订餐", {"t1": new_task("t1", "查日历", "echo")}))
-        tools = _tools_section(registry)
+        tools = tools_section(registry)
         failed = Section("失败", "失败：" + "x" * 500, priority=2, compact="有 1 个失败")
         # 预算恰好只够放下锚加上另外两段的紧凑形式
         limit = len(SEPARATOR.join([a.text, tools.compact, failed.compact]))
@@ -985,7 +992,7 @@ class TestUnsupportedActions:
         assert out["failure"] is None and out["unsupported"] == []
 
     def test_schema_asks_the_model_for_direct_answer(self):
-        from miagent.graph.schema import task_plan_model_for
+        from miagent.core.schema import task_plan_model_for
         assert "direct_answer" in task_plan_model_for(["echo"]).model_json_schema()["required"]
 
     def test_doable_part_runs_and_turn_is_unmet(self, registry):

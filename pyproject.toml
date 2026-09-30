@@ -1,6 +1,6 @@
 [project]
 name = "miagent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "适配 MiClaw 系统级 Agent 生态的轻量化通用 Agent 框架"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,9 @@ graph = ["langgraph>=1.2,<2.0"]
 # 端侧只用 FakeLLM 或本地模型时，不该把 openai 及其 HTTP 依赖栈装进来。
 cloud = ["openai>=1.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "psutil>=5.9", "grandalf>=0.8"]
+
+[tool.hatch.version]
+path = "miagent/__init__.py"
 
 [build-system]
 requires = ["hatchling"]

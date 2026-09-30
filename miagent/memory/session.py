@@ -19,13 +19,15 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from ..graph.state import AgentState, Turn, initial_state
+from ..core.state import AgentState, Turn, initial_state
 from ..llm.context import SEPARATOR, Estimator, Section
 
 __all__ = ["Agent", "Session", "Turn", "reachable", "render_history"]
 
 
 class Agent(Protocol):
+    """Session 与 Runtime 对 Agent 的全部要求：一个 invoke 方法。"""
+
     def invoke(self, state: AgentState, config: dict[str, Any] | None = None) -> AgentState: ...
 
 

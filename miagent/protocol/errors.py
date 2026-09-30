@@ -31,32 +31,32 @@ class ErrorCode(StrEnum):
     错误码常被直接插进日志，这个差别很致命。
     """
 
-    # ===== MC-1xxx 传输层：连接、通道、超时 =====
+    # ---------- MC-1xxx 传输层：连接、通道、超时 ----------
     MC_CONNECTION_FAILED = "MC-1001"
     MC_TRANSPORT_CLOSED = "MC-1002"
     MC_REQUEST_TIMEOUT = "MC-1003"
 
-    # ===== MC-2xxx 协议层：握手、版本、报文合法性 =====
+    # ---------- MC-2xxx 协议层：握手、版本、报文合法性 ----------
     MC_VERSION_MISMATCH = "MC-2001"
     MC_NOT_INITIALIZED = "MC-2002"
     MC_INVALID_MESSAGE = "MC-2003"
     MC_METHOD_NOT_FOUND = "MC-2004"
 
-    # ===== MC-3xxx 工具执行层 =====
+    # ---------- MC-3xxx 工具执行层 ----------
     MC_TOOL_NOT_FOUND = "MC-3001"
     MC_TOOL_INVALID_PARAMS = "MC-3002"
     MC_TOOL_EXECUTION_FAILED = "MC-3003"
 
-    # ===== MC-4xxx 端侧资源约束（端侧场景特有，云端框架没有这一类）=====
+    # ---------- MC-4xxx 端侧资源约束（端侧场景特有，云端框架没有这一类） ----------
     MC_RESOURCE_MEMORY_LIMIT = "MC-4001"
     MC_RESOURCE_BUSY = "MC-4002"
     MC_RESOURCE_POWER_SAVING = "MC-4003"
 
-    # ===== MC-5xxx 权限与用户授权 =====
+    # ---------- MC-5xxx 权限与用户授权 ----------
     MC_PERMISSION_DENIED = "MC-5001"
     MC_USER_REJECTED = "MC-5002"
 
-    # ===== AG-1xxx 规划层：模型输出到可执行计划的转换 =====
+    # ---------- AG-1xxx 规划层：模型输出到可执行计划的转换 ----------
     AG_PLAN_PARSE_FAILED = "AG-1001"
     AG_PLAN_MAX_STEPS_EXCEEDED = "AG-1002"
     AG_PLAN_NO_PROGRESS = "AG-1003"
@@ -64,23 +64,23 @@ class ErrorCode(StrEnum):
     AG_DEPENDENCY_UNRESOLVED = "AG-1005"
     AG_GOAL_NOT_ACHIEVED = "AG-1006"
 
-    # ===== AG-2xxx 工具调度层 =====
+    # ---------- AG-2xxx 工具调度层 ----------
     AG_TOOL_NOT_REGISTERED = "AG-2001"
     AG_TOOL_SCHEMA_INVALID = "AG-2002"
     AG_TOOL_RESULT_UNPARSABLE = "AG-2003"
     AG_TOOL_EXECUTION_FAILED = "AG-2004"
     AG_RESULT_REJECTED = "AG-2005"
 
-    # ===== AG-3xxx 上下文管理层 =====
+    # ---------- AG-3xxx 上下文管理层 ----------
     AG_CONTEXT_OVERFLOW = "AG-3001"
     AG_STATE_CORRUPTED = "AG-3002"
 
-    # ===== AG-4xxx 任务生命周期 =====
+    # ---------- AG-4xxx 任务生命周期 ----------
     AG_TASK_CANCELLED = "AG-4001"
     AG_TASK_BUDGET_EXCEEDED = "AG-4002"
     AG_INVALID_CALL_ORDER = "AG-4003"
 
-    # ===== AG-5xxx 模型层 =====
+    # ---------- AG-5xxx 模型层 ----------
     AG_LLM_UNAVAILABLE = "AG-5001"
     AG_LLM_INVALID_RESPONSE = "AG-5002"
 

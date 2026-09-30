@@ -44,14 +44,14 @@ class Method(StrEnum):
     两处定义迟早会不同步。
     """
 
-    # ---- 标准 MCP ----
+    # ---------- 标准 MCP ----------
     INITIALIZE = "initialize"                      # 握手：交换版本与能力
     INITIALIZED = "notifications/initialized"      # 通知：握手完成（无 id）
     TOOLS_LIST = "tools/list"                      # 列出服务端提供的工具
     TOOLS_CALL = "tools/call"                      # 调用一个工具
     PING = "ping"                                  # 保活探测
 
-    # ---- MiClaw 扩展 ----
+    # ---------- MiClaw 扩展 ----------
     AGENT_REGISTER = "miclaw/agent.register"       # Agent 向系统注册身份与声明
     AGENT_UNREGISTER = "miclaw/agent.unregister"   # 注销，释放系统侧资源
     RESOURCE_QUERY = "miclaw/resource.query"       # 查询当前端侧资源配额与占用
@@ -90,6 +90,8 @@ class JsonRpcError(BaseModel):
 
 
 class JsonRpcRequest(BaseModel):
+    """JSON-RPC 2.0 请求（带 id）。"""
+
     # extra="forbid"：出现协议未定义的字段直接报错。
     # 协议层宁可严格 —— 悄悄忽略未知字段会让版本不一致的问题拖到线上才暴露。
     model_config = ConfigDict(extra="forbid")
@@ -111,6 +113,8 @@ class JsonRpcNotification(BaseModel):
 
 
 class JsonRpcResponse(BaseModel):
+    """JSON-RPC 2.0 响应：result 与 error 二者恰有其一。"""
+
     model_config = ConfigDict(extra="forbid")
 
     jsonrpc: Literal["2.0"] = "2.0"
@@ -227,6 +231,7 @@ class ToolCallResult(BaseModel):
 
 
 def success_response(request_id: RequestId, result: dict[str, Any]) -> JsonRpcResponse:
+    """构造成功响应。"""
     return JsonRpcResponse(id=request_id, result=result)
 
 

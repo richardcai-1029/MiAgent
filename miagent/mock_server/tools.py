@@ -19,6 +19,8 @@ from ..protocol import ErrorCode, MiClawError
 
 @dataclass(frozen=True)
 class SystemTool:
+    """mock 服务端提供的一个系统工具：声明（名称、说明、参数 schema、权限、内存开销）与处理函数。"""
+
     name: str
     description: str
     input_schema: dict[str, Any]      # JSON Schema，能直接喂给模型做 function calling
@@ -36,12 +38,13 @@ def _schema(props: dict[str, str], required: list[str]) -> dict[str, Any]:
     }
 
 
-# --- 模拟 IPC 抖动：第一次调用超时，之后成功。用于验证 retry 分支。
-#     仅存在于 mock 服务端，真实 MiClaw 不需要这种东西。
+# 模拟 IPC 抖动：第一次调用超时，之后成功。用于验证 retry 分支。
+# 仅存在于 mock 服务端，真实 MiClaw 不需要这种东西。
 _flaky_calls = {"n": 0}
 
 
 def reset_flaky() -> None:
+    """重置模拟抖动的计数，使下一次 sync_settings 调用重新超时。"""
     _flaky_calls["n"] = 0
 
 
@@ -52,7 +55,7 @@ def _sync_settings(args: dict[str, Any]) -> str:
     return "设置已同步至云端"
 
 
-# --- 模拟"餐厅已订满"：第一家总是失败，用于演示重规划 ---
+# 模拟"餐厅已订满"：第一家总是失败，用于演示重规划
 def _book_restaurant(args: dict[str, Any]) -> str:
     if args.get("name") == "小馆 A":
         raise MiClawError(ErrorCode.MC_RESOURCE_BUSY, "小馆 A 今晚已订满")

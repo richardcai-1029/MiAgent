@@ -4,8 +4,8 @@
 必须能被穷举测试，而不是靠跑整张图间接验证。
 """
 
-from miagent.graph import dag
-from miagent.graph.state import TaskStatus, new_task
+from miagent.core import dag
+from miagent.core.state import TaskStatus, new_task
 from miagent.memory import anchor, episodic
 from miagent.protocol import ErrorCode
 

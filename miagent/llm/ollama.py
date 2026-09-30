@@ -40,6 +40,8 @@ NO_THINK = "/no_think"
 
 
 class OllamaLLM(OpenAICompatibleLLM):
+    """Ollama 本地部署的预设：占位鉴权、保留原生结构化输出、追加 /no_think 关闭思考。"""
+
     def __init__(
         self,
         model: str = DEFAULT_MODEL,

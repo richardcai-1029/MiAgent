@@ -32,7 +32,7 @@ PROFILES = [
     ("裸解释器", ""),
     ("瘦客户端", "import miagent.client, miagent.tools, miagent.llm"),
     ("完整 Agent", "import miagent.client, miagent.tools, miagent.llm; "
-                   "from miagent.graph import build_agent"),
+                   "from miagent import build_agent"),
 ]
 
 PROBE = '''
@@ -85,7 +85,7 @@ def main() -> None:
               f"{r['modules']:>9}{cloud:>7} ({pct})")
 
     full = results["完整 Agent"]
-    print(f"\n  完整形态的云端模块构成（端侧不需要，但无法从 LangGraph 中剥离）：")
+    print("\n  完整形态的云端模块构成（端侧不需要，但无法从 LangGraph 中剥离）：")
     for pkg in sorted(CLOUD_PACKAGES, key=lambda p: -full["tops"].get(p, 0)):
         if full["tops"].get(pkg):
             print(f"    {pkg:<16}{full['tops'][pkg]:>5} 个子模块")

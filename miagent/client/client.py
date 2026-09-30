@@ -4,7 +4,7 @@
   · 构造合法请求、配对响应、把服务端错误还原成异常
   · 做本地时序预检，非法调用不发出去
   · 受理 MiClaw 主动发来的请求与通知，转交登记好的处理函数
-它不管「该调哪个工具」（那是 graph 层的事），也不碰大模型。
+它不管「该调哪个工具」（那是 agent 层的事），也不碰大模型。
 
 收发分流：同一条管道上既有自己请求的响应，也有 MiClaw 主动发来的请求与通知。
 一个读线程独占接收，按报文种类分流 ——
@@ -37,7 +37,6 @@ from ..protocol import (
     JsonRpcRequest,
     JsonRpcResponse,
     Method,
-    MiAgentError,
     MiClawError,
     RequestId,
     ResourceBudget,
@@ -61,6 +60,8 @@ NotificationHandler = Callable[[dict[str, Any]], None]
 
 
 class MiClawClient:
+    """Agent 侧的 MiClaw 协议客户端：握手、注册、工具调用、受理 MiClaw 发来的请求与通知。"""
+
     def __init__(
         self,
         command: list[str] | None = None,
@@ -380,6 +381,8 @@ class MiClawClient:
         self._transport.close()
         self._reader.join(timeout=self._timeout)
 
+    # ------------------------------------------------------------
+    # 便捷入口
     # ------------------------------------------------------------
 
     def connect(self, agent_id: str, permissions: list[str], intents: list[str] | None = None):

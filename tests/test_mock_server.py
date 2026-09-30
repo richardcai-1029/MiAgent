@@ -1,10 +1,9 @@
 """mock 服务端测试：时序、权限、资源约束三类规则。"""
 
-import pytest
 
 from miagent.mock_server import MiClawMockServer, SessionState
 from miagent.mock_server.server import _REQUIRED_STATE
-from miagent.protocol import PROTOCOL_VERSION, ErrorCode, Method, ResourceBudget
+from miagent.protocol import PROTOCOL_VERSION, Method, ResourceBudget
 
 
 def req(id_, method, **params):

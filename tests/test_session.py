@@ -9,8 +9,8 @@ import json
 import pytest
 
 from miagent.client import MiClawClient
-from miagent.graph import build_agent
-from miagent.graph.nodes import _tools_section
+from miagent import build_agent
+from miagent.agent.prompting import tools_section
 from miagent.llm import FakeLLM
 from miagent.llm.context import Section, fit
 from miagent.memory import Session, Turn
@@ -178,7 +178,7 @@ class TestHistoryIsTrimmedOldestFirst:
         assert body == "上一轮结论：第三轮结论"
 
     def test_history_is_cut_before_tool_descriptions(self, registry):
-        tools = _tools_section(registry)
+        tools = tools_section(registry)
         sections = [tools, *render_history(self._turns())]
         _, notes = fit(sections, limit=len(tools.text) + 10, estimate=len)
         assert notes[:3] == ["对话历史·第 1 轮→已丢弃", "对话历史·第 2 轮→已丢弃",
@@ -222,7 +222,7 @@ class TestTurnsAreBounded:
 
     def test_pruning_never_changes_the_prompt(self, registry):
         """削与不削，规划器拿到的提示词逐字相同：削掉的都是必然被丢弃的。"""
-        tools = _tools_section(registry)
+        tools = tools_section(registry)
         goal = Section("用户目标", "用户目标：再订一次")
         turns = self._turns(12)
         history_limit = len("\n\n".join(s.text for s in render_history(turns))) // 2

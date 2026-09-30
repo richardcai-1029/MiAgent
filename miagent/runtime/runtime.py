@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from ..graph.state import AgentState
+from ..core.state import AgentState
 from ..llm.context import Estimator
 from ..memory.session import Agent, Session
 from ..protocol import (AgentMethod, ConversationEndParams, ErrorCode, MiClawError,
@@ -177,6 +177,8 @@ class Runtime:
         self.close()
 
     # ------------------------------------------------------------
+    # 内部：准入与派发，调用方须持有锁
+    # ------------------------------------------------------------
 
     def _admit(self) -> None:
         """在配额内放行排队的请求。调用方须持有锁。
@@ -255,7 +257,7 @@ def build_runtime(llm: LLM, registry: ToolRegistry, budget: ResourceBudget, *,
     单个会话保留的轮次按这个 llm 的上下文上限与计量口径推出。
     手工装配时漏掉任何一处都不会报错，只会让并发超出配额，故收在这一处。
     """
-    from ..graph import build_agent        # 惰性导入：本模块不依赖图引擎
+    from ..adapters.langgraph import build_agent   # 惰性导入：本模块不依赖图引擎
 
     llm.slots = SlotPool(inference_slots)
     agent = build_agent(llm, registry,
