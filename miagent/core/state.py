@@ -28,13 +28,15 @@ Route = Literal["local", "miclaw"]
 class TaskStatus(StrEnum):
     """任务生命周期。
 
-        pending ──依赖全部 done──→ ready ──派发──→ running ──┬─→ done
-           │                                                └─→ failed
-           └──依赖中有 failed──────────────────────────────────→ failed（级联）
+        pending ──就绪后被派发──→ running ──┬─→ done
+           │                                ├─→ failed
+           │                                └─→ pending（可重试的失败，或参数已被校验修正，退回重派）
+           └──依赖中有 failed─────────────────→ failed（级联）
+
+    「就绪」不是一个状态：pending 且依赖全部 done 即为就绪，由 dag.ready() 从任务图派生，不落库。
     """
 
     PENDING = "pending"
-    READY = "ready"
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"

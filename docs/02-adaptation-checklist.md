@@ -107,7 +107,7 @@ LangChain 的 LLM 抽象假设云端 API，与端侧模型的运行方式与可�
 |---|---|---|---|---|
 | G-2 | 无步数与预算上限，模型可能陷入死循环 | 单任务重试上限、重规划上限、累计执行上限三道闸，映射 AG-1002/AG-1003。累计执行上限由 Scheduler 在派发前检查，因而顺利执行的流程同样受其约束 | `scheduler.scheduler`；`test_graph.py::TestExecutionBudgetBoundsSuccessToo` | L1 |
 | G-3 | 模型可能把目标拆得过细，每一步都是一次真实调用，白白消耗端侧算力 | 规划产出的待执行任务数超过累计执行预算即拒绝——这样的计划在预算内必然跑不完，与其执行到一半才发现不如当场拒绝。上限直接取执行预算，不另立数字 | `planning._plan`；`test_graph.py::TestPlanSizeIsChecked` | L0 |
-| G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、五态生命周期、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `core/dag.py`；`test_dag.py` 28 条用例覆盖边界 | L0 |
+| G-4 | 框架无任务依赖建模，只能线性执行，无法表达分支与汇合 | 引入任务 DAG：显式 dependencies、四态生命周期（就绪由依赖派生、不落库）、依赖解析/就绪判定/完成检测/死锁检测/级联失败全部为确定性纯函数，不交给模型 | `core/dag.py`；`test_dag.py` 28 条用例覆盖边界 | L0 |
 | G-5 | 无依赖关系的任务仍被串行执行，浪费 IPC 等待时间 | 以 LangGraph Send 并行派发同层任务；需为 tasks 定义按 id 合并的 reducer，避免多分支写回互相覆盖 | `topology.route_after_scheduler` 返回 Fanout 列表，LangGraph 适配层译为 Send 扇出；outcomes 与 execution_count 用 reducer 汇总；实测无依赖任务提速 3.00x | **L2 · 高** |
 | G-6 | 任务图非法（依赖缺失/自依赖/成环）会表现为莫名死锁 | Kahn 拓扑排序在执行前校验，映射 AG-1004；运行期死锁映射 AG-1005 | `dag.validate()`；`test_cyclic_plan_rejected_before_execution` | L0 |
 | G-8 | 「所有任务都到了终态」被当作「目标达成」：重规划跑完一个新任务都没产出时，失败任务不会再有人接手，流程却照常收尾，用户拿到声称完成实则漏做的回答 | 重规划产出为空且情景记忆中有失败记录时判定未达成，错误码取根因（跳过级联失败的 AG-1005，同为自身失败取最近一轮）。失败记录本身不作为判据——重规划成功接手时，前一条路失败是正常剧情 | `planning.replanner`、`_root_failure`；`test_graph.py::TestCompletionIsVerified` | L0 |

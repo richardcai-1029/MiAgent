@@ -103,7 +103,7 @@ def failed_tasks(tasks: Tasks) -> list[str]:
 
 def pending_tasks(tasks: Tasks) -> list[str]:
     """尚未派发的任务 id。"""
-    return by_status(tasks, TaskStatus.PENDING, TaskStatus.READY)
+    return by_status(tasks, TaskStatus.PENDING)
 
 
 def ancestors(tasks: Tasks, roots: set[str]) -> set[str]:
@@ -160,7 +160,7 @@ def ready(tasks: Tasks) -> list[str]:
 
     判定条件：
 
-        status 为 pending / ready  且  所有 dependencies 都已 done
+        status 为 pending  且  所有 dependencies 都已 done
 
     返回的是【列表】而不是单个 —— 长度大于 1 就意味着这些任务之间
     没有依赖关系，可以并行派发。
@@ -173,7 +173,7 @@ def ready(tasks: Tasks) -> list[str]:
     """
     out = []
     for tid, task in tasks.items():
-        if task["status"] not in (TaskStatus.PENDING, TaskStatus.READY):
+        if task["status"] is not TaskStatus.PENDING:
             continue
         if all(tasks[d]["status"] is TaskStatus.DONE for d in task["dependencies"]):
             out.append(tid)
