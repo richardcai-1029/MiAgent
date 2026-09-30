@@ -20,27 +20,27 @@
     "context_length": 8192
   },
   "context_limit_chars": 16000,
-  "started": "2026-09-30 00:40:07",
+  "started": "2026-09-30 19:28:07",
   "per_category": 20,
   "seed": 20260929,
   "cases": 220,
   "turns": 247,
   "resources": {
-    "samples": 5043,
-    "rss_start_mb": 188.98,
-    "rss_peak_mb": 188.98,
-    "rss_end_mb": 51.52,
-    "rss_slope_mb_per_1k": 38.164,
-    "cpu_avg_pct": 0.5,
-    "cpu_peak_pct": 8.3,
-    "threads_peak": 5,
-    "cpu_seconds": 24.34,
-    "wall_seconds": 5065.51
+    "samples": 5999,
+    "rss_start_mb": 194.66,
+    "rss_peak_mb": 194.66,
+    "rss_end_mb": 45.55,
+    "rss_slope_mb_per_1k": 131.918,
+    "cpu_avg_pct": 0.4,
+    "cpu_peak_pct": 8.2,
+    "threads_peak": 6,
+    "cpu_seconds": 25.11,
+    "wall_seconds": 6025.04
   },
   "llm_stats": {
-    "calls": 1255,
-    "total_ms": 4537227.24,
-    "avg_ms": 3615.32,
-    "repairs": 99
+    "calls": 1217,
+    "total_ms": 5141930.6,
+    "avg_ms": 4225.09,
+    "repairs": 109
   }
 }

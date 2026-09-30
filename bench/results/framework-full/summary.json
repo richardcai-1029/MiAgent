@@ -4,15 +4,15 @@
   "verify": true,
   "data": "/Users/caijicheng/projects/MiAgent/bench/data/cases.jsonl",
   "resources": {
-    "samples": 2903,
-    "rss_start_mb": 188.84,
-    "rss_peak_mb": 197.81,
-    "rss_end_mb": 55.34,
-    "rss_slope_mb_per_1k": -7.218,
-    "cpu_avg_pct": 27.9,
+    "samples": 2925,
+    "rss_start_mb": 193.84,
+    "rss_peak_mb": 195.88,
+    "rss_end_mb": 182.97,
+    "rss_slope_mb_per_1k": 3.15,
+    "cpu_avg_pct": 28.3,
     "cpu_peak_pct": 100.3,
     "threads_peak": 6,
-    "cpu_seconds": 167.43,
-    "wall_seconds": 597.95
+    "cpu_seconds": 173.38,
+    "wall_seconds": 613.11
   }
 }

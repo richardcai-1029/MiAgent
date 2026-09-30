@@ -20,27 +20,27 @@
     "context_length": 8192
   },
   "context_limit_chars": 16000,
-  "started": "2026-09-29 22:12:02",
+  "started": "2026-09-30 17:03:56",
   "per_category": 100,
   "seed": 20260929,
   "cases": 1100,
   "turns": 1227,
   "resources": {
-    "samples": 8835,
-    "rss_start_mb": 176.05,
-    "rss_peak_mb": 176.05,
-    "rss_end_mb": 41.64,
-    "rss_slope_mb_per_1k": 14.643,
+    "samples": 8591,
+    "rss_start_mb": 184.97,
+    "rss_peak_mb": 184.97,
+    "rss_end_mb": 42.52,
+    "rss_slope_mb_per_1k": -2.037,
     "cpu_avg_pct": 0.3,
-    "cpu_peak_pct": 10.0,
+    "cpu_peak_pct": 8.8,
     "threads_peak": 3,
-    "cpu_seconds": 28.0,
-    "wall_seconds": 8882.79
+    "cpu_seconds": 27.38,
+    "wall_seconds": 8650.28
   },
   "llm_stats": {
-    "calls": 1492,
-    "total_ms": 8671744.46,
-    "avg_ms": 5812.16,
-    "repairs": 316
+    "calls": 1520,
+    "total_ms": 8635743.29,
+    "avg_ms": 5681.41,
+    "repairs": 293
   }
 }
